@@ -42,7 +42,7 @@ def create_scales(
     return ((rs//2)*2+1).astype(np.int64)
 
 
-def polynomial_detrending(
+def detrending(
     series: np.array,
     s: int,
     order: int = 2
@@ -87,7 +87,7 @@ def clean_dataset(
     df: pd.DataFrame,
     threshold_min: int = 300,
     threshold_max: int = 1600,
-    threshold_width: int = 300,
+    threshold_width: float = 0.2,
     interpolation_method: str = 'linear'
 ) -> pd.DataFrame:
     """
@@ -126,9 +126,6 @@ def clean_dataset(
     new_series : pd.DataFrame
         Clean data.
     """
-    # Replace values off the range by NaN
-    df[(df <= threshold_min) | (df >= threshold_max)] = np.NaN
-
     # Replace values with large differences by Nan
     df['dRRI'] = (df[0].diff().fillna(0)).abs()
     if (threshold_width <= 1):
@@ -136,6 +133,9 @@ def clean_dataset(
         df.iloc[thresholds > threshold_width, 0] = np.NaN
     else:
         df.iloc[df.dRRI > threshold_width, 0] = np.NaN
+
+    # Replace values off the range by NaN
+    df[(df <= threshold_min) | (df >= threshold_max)] = np.NaN
 
     # Interpolate all points that were replace by Nan
     df = df.interpolate(method=interpolation_method)
@@ -189,14 +189,12 @@ def read_file(
     order: int = 4,
     low_rri: int = 300,
     high_rri: int = 1600,
-    diff_rri: int = 250,
+    diff_rri: int = 0.2,
     detrending: bool = False,
-    interpolation_rate: int = 4,
+    resampling_rate: int = 4,
     clean_data=True
 ) -> dict:
-    """Function that read HRV data from file and detrends and downcasts it.
-    A single file can be split in many different individual series by choosing
-    the `time_split`.
+    """Function that read HRV data from file cleans it if so required.
 
     Parameters
     ----------
@@ -217,7 +215,7 @@ def read_file(
         preprocessing. Default: 250
     detrending : bool, optional
         Determine whether detrending is applied or not. Default: False
-    interpolation_rate : int, optional
+    resampling_rate : int, optional
         Determines the sampling rate in Hz to use to interpolate the signal.
         If None, the signal is not interpolated. Default: None
     clean_data : bool, optional
@@ -248,19 +246,48 @@ def read_file(
             threshold_max=high_rri,
             threshold_width=diff_rri)
 
-    if (interpolation_rate is not None):
-        df = resample_hrv(df, interpolation_rate)
+    if (resampling_rate is not None):
+        df = resample_hrv(df, resampling_rate)
 
     out = df.to_numpy().flatten()
     out = np.nan_to_num(out, nan=np.mean(out))
 
     if (detrending and (len(out) > 2*s)):
-        out = polynomial_detrending(
-                                out,
-                                s,
-                                order
-                            )
+        out = detrending(
+                    out,
+                    s,
+                    order
+                )
     return out
+
+
+def time_split(signal: np.array, freq: str) -> list:
+    """Function that splits the time series into same length segments
+
+    Parameters
+    ----------
+    signal : np.array
+        Array with the HRV data in ms.
+    freq : str
+        String with the lenght of each segment.
+    Returns
+    -------
+    out : list
+        Numpy array with the time series.
+    """
+    df = pd.DataFrame(
+            signal,
+            index=pd.to_datetime(np.cumsum(signal), unit='ms')
+            )
+
+    # Split data into 5min segments
+    split = df.groupby(pd.Grouper(freq=freq))
+
+    # Save each segment as a numpy array
+    # (Only segments with over 4.5min are selected)
+    return [
+        i.to_numpy().flatten() for _, i in split
+    ][:-1]
 
 
 # ---- Still under work, I haven't properly tested. DON'T USE as is ----- #
@@ -291,7 +318,7 @@ def non_gaussianity(series, s=32, order=3, q=0.25):
     out = []
 
     for i in range(0, len(series)-2*s, 2*s):
-        tmp = polynomial_detrending(series[i:i+2*s], s, order)
+        tmp = detrending(series[i:i+2*s], s, order)
 
         out += list(tmp[s:]-tmp[:-s])
 
@@ -308,7 +335,7 @@ def generalized_variance(series, scale, order):
     for a given scale and detrending order of the savitzky-golay filter
     """
     return np.sqrt(np.sum(
-                polynomial_detrending(
+                        detrending(
                                   series,
                                   scale,
                                   order
