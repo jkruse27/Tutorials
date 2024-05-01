@@ -4,6 +4,7 @@ import pandas as pd
 from scipy.special import gamma
 from scipy.signal import savgol_filter
 
+
 def detrending(
     series: np.array,
     s: int,

@@ -1,0 +1,5 @@
+.pyd
+.c
+.pyc
+.html
+*.egg-info/*
