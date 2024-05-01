@@ -16,7 +16,8 @@ This repository is organized as follows:
 
 - data: Contains sample data that is used as demonstration during the tutorials.
 - notebooks: Jupyter notebooks containing the actual tutorials.
-- utils: Python script files with the implemented functions in a more accessible/concise manner, so that they can be imported into other projects.
+- hrv_utils: Python script files with the implemented functions in a more accessible/concise manner, so that they can be imported into other projects.
+- examples: Example scripts using the package.
 
 ## How to use
 
@@ -25,7 +26,7 @@ Using Python environments (such as those in venvs or conda) is recommended to ke
 The requirements.txt file contains all python packages that are required throughout the tutorial, and it can be installed by running the command:
 
 ```
-pip install -r requirements.txt
+pip install  --user -r requirements.txt
 ```
 
 This package contains some main functions such as:

@@ -5,6 +5,5 @@ scikit-learn
 pandas
 statsmodels
 keras
-tensorflow
 cython
 .
