@@ -220,7 +220,7 @@ def read_file(
                     s,
                     order
                 )
-    return out
+    return out.astype(np.double)
 
 
 def time_split(signal: np.array, freq: str) -> list:

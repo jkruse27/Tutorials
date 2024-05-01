@@ -1,18 +1,12 @@
 import cython
-@cython.boundscheck(False)
-@cython.wraparound(False)
 import numpy as np
 cimport numpy as cnp
-
-cnp.import_array()
-DTYPE = np.double
-ctypedef cnp.double_t DTYPE_t
-
+from cython.parallel import prange
 
 def create_scales(
-        min_box: int,
-        max_box: int,
-        ratio: int = np.exp2(0.125)
+        min_box,
+        max_box,
+        ratio = np.exp2(0.125)
     ) -> np.array:
     """Function that creates a list of scales in the
     specified range.
@@ -43,13 +37,26 @@ def create_scales(
     # Select only the values in the defined range
     rs = rs[rs < max_box]
 
-    return ((rs//2)*2+1).astype(np.int64)
+    return np.unique((rs//2)*2+1).astype(np.int32)
 
-#
-cpdef compute_dma(
+
+def dma(
+    series,
+    scales,
+    order,
+    integrate = 1
+    ):
+
+    return np.asarray(compute_dma(series, scales, order, integrate))
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cdef double[:] compute_dma(
     double[:] series,
-    double[:] scales,
-    int order
+    long[:] scales,
+    int order,
+    int integrate = 1
     ):
     """Function that calculates the detrended moving average of a series
     and returns the array of values for each scale.
@@ -59,7 +66,7 @@ cpdef compute_dma(
     series: cnp.ndarray
         Time series that is being analyzed as a numpy array of doubles.
     scales: cnp.ndarray
-        The scales that the series will be analyzed at as a numpy array of doubles
+        The scales that the series will be analyzed at as a numpy array of longss
     order: int
         Order of the detrending polynomial.
 
@@ -68,448 +75,290 @@ cpdef compute_dma(
         int
     """
     cdef long n, i, n_scales, i_refresh
-    cdef double[:] f2 = np.zeros_like(series)
+    cdef double[:] f2
+    cdef double[:,:] local_sum
 
+    if(integrate):
+        series = np.cumsum(series-np.mean(series))
     n = series.shape[0]
     n_scales = scales.shape[0]
 
     if(order == 0):
-        i_refresh == 50000
+        i_refresh = 50000
     elif(order == 2):
-        i_refresh == 5000
+        i_refresh = 5000
     else:
-        i_refresh == 100
+        i_refresh =  100
     if(i_refresh > n): i_refresh = n
 
-    for i in range(0, n_scales):
-        f2[i] = estimate_f2(series, scales[i], order, i_refresh)
+    local_sum = np.empty((5, <long>(n/i_refresh)))
+    f2 = np.empty(n_scales)
+
+    with nogil:
+        for i in range(0, n_scales):
+            f2[i] = estimate_f2(series, scales, i, order, i_refresh, local_sum)
 
     return np.asarray(f2)
 
-#
-def cmat(k: float, order: int):
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cdef int cmat(float k, int order, double* c) nogil:
+    cdef double den, k2, k3, k4, k5
+    k2 = k*k
+    k3 = k2*k
+    k4 = k3*k
+    k5 = k4*k
+
     if(order == 0):
-        return 1/(2*k+1)
+        c[0] = 1/(2*k+1)
     elif(order == 2):
-        den = 8*(k**3)+12*(k**2)-2*k-3
-        c1 = (9*(k**2)+9*k-3)/den
-        c2 = -15/den
-        return c1, c2
+        den = 8*k3+12*k2-2*k-3
+        c[0] = (9*k2+9*k-3)/den
+        c[1] = -15/den
     elif(order == 4):
-        den = 180+72*k-800*(k**2)-320*(k**3)+320*(k**4)+128*(k**5)
-        c1 = (180-750*k-525*(k**2)+450*(k**3)+225*(k**4))/den;
-        c2 = (1575-1050*k-1050*(k**2))/den;
-        c3 = 945/ den;
-        return c1, c2, c3
+        den = 180+72*k-800*k2-320*k3+320*k4+128*k5
+        c[0] = (180-750*k-525*k2+450*k3+225*k4)/den
+        c[1] = (1575-1050*k-1050*k2)/den
+        c[2] = 945/den
     else:
-        raise Exception("Invalid order. Currently only 0, 2 and 4 orders are implemented.") 
+        return -1
 
+    return 0
 
-def savitzky_golay(m: float, n: float, order: int):
-    if(order == 0)
-        return 1/(double)((n-1)/2 + m + 1)
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cdef double estimate_f2(
+    double[:] series, 
+    long[:] scales, 
+    long index, 
+    int order, 
+    long i_refresh,
+    double[:,:] local_sums
+    ) nogil:
+    cdef double[3] c
+    cdef long n, i, i0, ic, j, itemp, kb, iloc, k
+    cdef double f2, a0, a0L, a0R, y00, y0i, y10, y1i, y0ii, y1ii, y0iii, y0iv
+    cdef double temp, temp1, temp2, y0L, y0R, nn1, nn2, nn3, nn4, y1iii, y1iv
+    cdef long scale = <long> (scales[index])
+
+    n = series.shape[0]
+    f2 = 0
+    k = <long> ((scale-1)/2)
+    ic = k+1
+
+    if(order == 0):
+        y10=0;
+
+        for i in range(0, scale):
+            y10 += series[i]
+
+        cmat(<double> k, order, c)
+        a0 = c[0]*y10
+        temp = (series[ic] - a0)
+        f2 = temp*temp
+        itemp = n-scale
+
+        for i in range(0, itemp):
+            if(i % i_refresh == 0):
+                y10=0
+                for j in range(0, scale):
+                    y10 += series[i+j]
+            else:
+                y00 = y10
+                y10 = y00 + series[i+scale]-series[i]
+
+            a0 = c[0]*y10
+            temp = (series[i+ic] - a0)
+            f2 += temp*temp
+        f2 = f2/<double>(n)
+
     elif(order == 2):
+        iloc = 1
+        kb = <long> ((scales[index-1]-1)/2)
+        nn1 = <double>(kb-k)
+        nn2 = nn1*nn1
+
+        if(index == 0):
+            i0 = 1
+            y10 = 0
+            y1i = 0
+            y1ii = 0
+        else:
+            i0 = <long> (scales[index-1]+1)
+            y10 = local_sums[0][iloc]
+            y1i = local_sums[1][iloc]+local_sums[0][iloc]*nn1
+            y1ii = local_sums[2][iloc]+2*local_sums[1][iloc]*nn1+local_sums[0][iloc]*nn2
+
+        for i in range(i0, scale+1):
+            y10 += series[i]
+            temp1 = series[i]*<double>(i-k-1)
+            y1i += temp1;
+            temp2 = temp1*<double>(i-k-1)
+            y1ii += temp2
+        
+        local_sums[0][iloc] = y10
+        local_sums[1][iloc] = y1i
+        local_sums[2][iloc] = y1ii
+
+        cmat(<double>k, order, c)
+        a0 = c[0]*y10+c[1]*y1ii
+        temp1 = (series[ic] - a0)
+        f2 += temp1*temp1
+        itemp = n-scale
+
+        for i in range(0, itemp):
+            if(i % i_refresh == 0):
+                iloc = iloc + 1
+                if(index == 1):
+                    i0 = 1
+                    y10 = 0
+                    y1i = 0
+                    y1ii = 0
+                else:
+                    i0 = scales[index-1]+1
+                    y10 = local_sums[0][iloc]
+                    y1i = local_sums[1][iloc]+local_sums[0][iloc]*nn1
+                    y1ii = local_sums[2][iloc]+2*local_sums[1][iloc]*nn1+local_sums[0][iloc]*nn2
+                
+                for j in range(i0, scale+1):
+                    y10 += series[i+j]
+                    temp1 = series[i+j]*<double>(j-k-1)
+                    y1i += temp1
+                    temp2 = temp1*<double>(j-k-1)
+                    y1ii += temp2
+
+                local_sums[0][iloc]=y10;
+                local_sums[1][iloc]=y1i;
+                local_sums[2][iloc]=y1ii;
+            else:
+                y00 = y10
+                y0i = y1i
+                y0ii = y1ii
+
+                y10 = y00 + series[i+scale]-series[i]
+                temp1 = series[i]*<double>(k+1)
+                temp2 = series[i+scale]*<double>k
+                y1i = y0i - y00 + temp1 + temp2
+                y1ii = y0ii - 2*y0i + y00 - temp1 *<double>(k+1) + temp2*<double>k
+            a0 = c[0]*y10+c[1]*y1ii;
+
+            temp1 = (series[i+ic] - a0)
+            f2 += temp1*temp1
+        f2 = f2/<double>(n)
 
     elif(order == 4):
+        iloc = 1
+        kb = <long> ((scales[index-1]-1)/2)
+        nn1 = <double>(kb-k)
+        nn2 = nn1*nn1
+        nn3 = nn2*nn1
+        nn4 = nn2*nn2
+        
+        if(index == 0):
+            i0 = 1
+            y10 = 0
+            y1i = 0
+            y1ii = 0
+            y1iii = 0
+            y1iv = 0
+        else:
+            i0 = scales[index-1] + 1
+            y10 = local_sums[0][iloc]
+            y1i = local_sums[1][iloc] + local_sums[0][iloc]*nn1;
+            y1ii = local_sums[2][iloc]+2*local_sums[1][iloc]*nn1+local_sums[0][iloc]*nn2;
+            y1iii = local_sums[3][iloc]+3*local_sums[2][iloc]*nn1+3*local_sums[1][iloc]*nn2+local_sums[0][iloc]*nn3;
+            y1iv = local_sums[4][iloc]+4*local_sums[3][iloc]*nn1+6*local_sums[2][iloc]*nn2+4*local_sums[1][iloc]*nn3+local_sums[0][iloc]*nn4;
+
+        for i in range(i0, scale+1):
+            y10 += series[i]
+            temp1 = series[i]*<double>(i-k-1)
+            y1i += temp1
+            temp2 = temp1*<double>(i-k-1)
+            y1ii += temp2
+            temp1 = temp2*<double>(i-k-1)
+            y1iii += temp1
+            temp2 = temp1*<double>(i-k-1)
+            y1iv += temp2
+        
+        local_sums[0][iloc] = y10
+        local_sums[1][iloc] = y1i
+        local_sums[2][iloc] = y1ii
+        local_sums[3][iloc] = y1iii
+        local_sums[4][iloc] = y1iv
+        
+        
+        cmat(<double> k, order, c)
+        
+        a0 = c[0]*y10+c[1]*y1ii+c[2]*y1iv
+        temp1 = (series[ic] - a0)
+        f2 = temp1*temp1
+
+        itemp = n-scale
+
+        for i in range(0, itemp):
+            if(i % i_refresh == 0):
+                iloc += 1
+                if(index == 1):
+                    i0 = 1
+                    y10=0
+                    y1i=0
+                    y1ii=0
+                    y1iii=0
+                    y1iv=0
+                else:
+                    i0 = scales[index-1]+1
+                    y10 = local_sums[0][iloc]
+                    y1i = local_sums[1][iloc]+local_sums[0][iloc]*nn1
+                    y1ii = local_sums[2][iloc]+2*local_sums[1][iloc]*nn1+local_sums[0][iloc]*nn2
+                    y1iii = local_sums[3][iloc]+3*local_sums[2][iloc]*nn1+3*local_sums[1][iloc]*nn2+local_sums[0][iloc]*nn3
+                    y1iv = local_sums[4][iloc]+4*local_sums[3][iloc]*nn1+6*local_sums[2][iloc]*nn2+4*local_sums[1][iloc]*nn3+local_sums[0][iloc]*nn4
+                
+                for j in range(i0, scale+1):
+                    y10 += series[i+j];
+                    temp1 = series[i+j]*<double>(j-k-1)
+                    y1i += temp1
+                    temp2 = temp1*<double>(j-k-1)
+                    y1ii += temp2
+                    temp1 = temp2*<double>(j-k-1)
+                    y1iii += temp1
+                    temp2 = temp1*<double>(j-k-1)
+                    y1iv += temp2
+
+                local_sums[0][iloc]=y10
+                local_sums[1][iloc]=y1i
+                local_sums[2][iloc]=y1ii
+                local_sums[3][iloc]=y1iii
+                local_sums[4][iloc]=y1iv
+            else:
+                y00 = y10
+                y0i = y1i
+                y0ii = y1ii
+                y0iii = y1iii
+                y0iv = y1iv
+
+                y10 = y00 + series[i+scale]-series[i]
+                temp1 = series[i]*<double>(k+1);
+                temp2 = series[i+scale]*<double>k
+                y1i = y0i - y00 + temp1 + temp2
+                temp1 = temp1*<double>(k+1)
+                temp2 = temp2*<double>k
+                y1ii = y0ii - 2*y0i + y00 - temp1 + temp2
+                temp1 = temp1*<double>(k+1);
+                temp2 = temp2*<double>k
+                y1iii = y0iii - 3*y0ii + 3*y0i - y00 + temp1 + temp2
+                y1iv = y0iv - 4*y0iii + 6* y0ii - 4 * y0i + y00 - temp1 *<double>(k+1) + temp2*<double>k
+            
+            a0 = c[0]*y10+c[1]*y1ii+c[2]*y1iv
+
+            temp1 = (series[i+ic] - a0)
+            f2 += temp1*temp1
+
+        f2 = f2/<double>(itemp+1)
 
     else:
-        raise Exception("Invalid order. Currently only 0, 2 and 4 orders are implemented.") 
-
-
-cpdef estimate_f2(long[:] series, long scale, int order, long i_refresh):
-
-void sg2(double *c0, long m, long n)
-{
-	double d;
-	double mn,n2,n3,m2,m3,k2;
-	long k;
-	
-	mn = 2*(double)m+(double)n;
-	n2 = n*n;
-	n3 = n2*n;
-	m2 = m*m;
-	m3 = m2*m;
-	
-	d = (mn+3)*(mn-3)*(mn-1)*(mn+1)*(mn+5);
-	
-	mn = m*n;
-	
-	for(k=-m;k<=(n-1)/2;k++){
-		k2 = k*k;
-		c0[k] = (90 + 720*k2 - 240*m + 576*k*m + 960*k2*m + 48*m2 + 1728*k*m2 + 
-			960*k2*m2 + 576*m3 + 1152*k*m3 + 288*m2*m2 - 120*n - 432*k*n - 
-			960*k2*n - 528*mn - 2304*k*mn - 1920*k2*mn - 864*m2*n - 
-			2304*k*m2*n - 576*m3*n + 84*n2 + 576*k*n2 + 240*k2*n2 + 
-			720*m*n2 + 1152*k*m*n2 + 720*m2*n2 - 72*n3 - 144*k*n3 - 
-			144*m*n3 + 18*n2*n2)/d;
-	}
-}
-
-
-double est_f2(long n, long scale){
-	double f2,a0,a0L,a0R;
-	double y00,y0i,y10,y1i;
-	double temp,temp1,temp2,y0L,y0R;
-	long i,j; /* n: data length */
-	long itemp;
-	long k,ic;
-	
-	f2 = 0;
-	k = (scale-1)/2;
-	ic = k+1;
-	f2 = 0;
-
-	if(ends==1){
-	  /* both ends */
-	  y0L=0;
-	  y0R=0;
-	  for(i=1;i<=k;i++){
-	    y0L += y[i];
-	    y0R += y[n-i+1];
-	  }
-
-	  for(i=1;i<=k;i++){
-	    y0L += y[k+i];
-	    y0R += y[n-i+1-k];
-
-	    sg0(i-1 ,scale);
-	    a0L = c1*y0L;
-	    a0R = c1*y0R;
-/******************************/
-	  if(nr == 1){
-		data[i] = a0L;
-		data[n-i+1] = a0R;
-	  }
-/******************************/
-	    temp1 = (y[i] - a0L);
-	    temp2 = (y[n-i+1] - a0R);
-	    f2 += temp1*temp1+temp2*temp2;
-	  }
-	}
-
-	/* initial values */
-	y10=0;
-	for(i=1;i<=scale;i++){
-		y10 += y[i];
-	}
-
-	cmat((double)k);
-
-	a0 = c1*y10;
-	temp = (y[ic] - a0);
-
-/******************************/
-	  if(nr == 1){
-		data[ic] = a0;
-	  }
-/******************************/
-
-	f2 = temp*temp;
-
-	itemp = n-scale;
-	
-	for(i=1;i<=itemp;i++){
-		if(i % i_refresh == 0){
-			y10=0;
-			for(j=1;j<=scale;j++){
-				y10 += y[i+j];
-			}
-		}else{
-			y00 = y10;
-			y10 = y00 + y[i+scale]-y[i];
-		}
-		
-		a0 = c1*y10;
-/******************************/
-	if(nr == 1){
-		data[i+ic] = a0;
-	}
-/******************************/
-
-		temp = (y[i+ic] - a0);
-		f2 += temp*temp;
-	}
-	if(ends==1){
-	  return f2/(double)(itemp+1);
-	}else{
-	  return f2/(double)(n);
-	}
-}
-
-
-loc_sum0 = vector(1,(long)(n/i_refresh)+1);
-loc_sum1 = vector(1,(long)(n/i_refresh)+1);
-loc_sum2 = vector(1,(long)(n/i_refresh)+1);
-
-loc_sum0 = vector(1,(long)(n/i_refresh)+1);
-loc_sum1 = vector(1,(long)(n/i_refresh)+1);
-loc_sum2 = vector(1,(long)(n/i_refresh)+1);
-loc_sum3 = vector(1,(long)(n/i_refresh)+1);
-loc_sum4 = vector(1,(long)(n/i_refresh)+1);
-
-double est_f2(long n, long k2){
-	double f2,a0,a0L,a0R;
-	double y00,y0i,y0ii,y10,y1i,y1ii;
-	double temp1,temp2;
-	double nn1,nn2;
-	double *c0_;
-	long i,j,i0; /* n: data length */
-	long itemp;
-	long k,kb,ic,scale,iloc;
-
-	scale = rs[k2];
-	k = (scale-1)/2;
-	ic = k+1;
-	f2 = 0;
-
-	if(ends==1){
-	  /* both ends */
-	  c0_ = vector(-k,k);
-
-	  for(i=1;i<=k;i++){
-		sg2(c0_, i-1 ,scale);
-		a0L = 0;
-		a0R = 0;
-		for(j=1;j<=i+k;j++){
-			a0L += c0_[j-i]*y[j];
-			a0R += c0_[j-i]*y[n-j+1];
-		}
-/******************************/
-	  if(nr == 1){
-		data[i] = a0L;
-		data[n-i+1] = a0R;
-	  }
-/******************************/
-
-		temp1 = (y[i] - a0L);
-		temp2 = (y[n-i+1] - a0R);
-		f2 += temp1*temp1+temp2*temp2;
-	  }
-	free_vector(c0_,-k,k);
-	}
-	/* center part*/	
-	/* initial values */
-
-	iloc=1;
-	kb = (rs[k2-1]-1)/2;
-	nn1=(double)(kb-k);
-	nn2=nn1*nn1;
-	
-	if(k2 == 1){
-		i0 = 1;
-		y10=0;
-		y1i=0;
-		y1ii=0;
-	}else{
-		i0 = rs[k2-1]+1;
-		y10=loc_sum0[iloc];
-		y1i=loc_sum1[iloc]+loc_sum0[iloc]*nn1;
-		y1ii=loc_sum2[iloc]+2*loc_sum1[iloc]*nn1+loc_sum0[iloc]*nn2;
-	}
-
-	for(i=i0;i<=scale;i++){
-		y10 += y[i];
-		temp1 = y[i]*(double)(i-k-1);
-		y1i += temp1;
-		temp2 = temp1*(double)(i-k-1);
-		y1ii += temp2;
-	}
-	
-	loc_sum0[iloc]=y10;
-	loc_sum1[iloc]=y1i;
-	loc_sum2[iloc]=y1ii;
-
-	cmat((double)k);
-	a0 = c1*y10+c2*y1ii;
-/******************************/
-	  if(nr == 1){
-		data[ic] = a0;
-	  }
-/******************************/
-
-
-	temp1 = (y[ic] - a0);
-	f2 += temp1*temp1;
-
-	itemp = n-scale;
-
-	for(i=1;i<=itemp;i++){
-		if(i % i_refresh == 0){
-			iloc++;
-			if(k2 == 1){
-				i0 = 1;
-				y10=0;
-				y1i=0;
-				y1ii=0;
-			}else{
-				i0 = rs[k2-1]+1;
-				y10=loc_sum0[iloc];
-				y1i=loc_sum1[iloc]+loc_sum0[iloc]*nn1;
-				y1ii=loc_sum2[iloc]+2*loc_sum1[iloc]*nn1+loc_sum0[iloc]*nn2;
-			}
-			
-			for(j=i0;j<=scale;j++){
-				y10 += y[i+j];
-				temp1 = y[i+j]*(double)(j-k-1);
-				y1i += temp1;
-				temp2 = temp1*(double)(j-k-1);
-				y1ii += temp2;
-			}
-			loc_sum0[iloc]=y10;
-			loc_sum1[iloc]=y1i;
-			loc_sum2[iloc]=y1ii;
-		}else{
-			y00 = y10;
-			y0i = y1i;
-			y0ii = y1ii;
-
-			y10 = y00 + y[i+scale]-y[i];
-			temp1 = y[i]*(double)(k+1);
-			temp2 = y[i+scale]*(double)k;
-			y1i = y0i - y00 + temp1 + temp2;
-			y1ii = y0ii - 2*y0i + y00 - temp1 *(double)(k+1) + temp2*(double)k;
-		}
-		a0 = c1*y10+c2*y1ii;
-/******************************/
-	if(nr == 1){
-		data[i+ic] = a0;
-	}
-/******************************/
-
-		temp1 = (y[i+ic] - a0);
-		f2 += temp1*temp1;
-	}
-	if(ends==1){
-	  return f2/(double)(itemp+1);
-	}else{
-	  return f2/(double)(n);
-	}
-}
-
-double est_f2(long n, long k2){
-	double f2,a0;
-	double y00,y0i,y0ii,y0iii,y0iv,y10,y1i,y1ii,y1iii,y1iv;
-	double temp1,temp2;
-	double nn1,nn2,nn3,nn4;
-	long i,j,i0; /* n: data length */
-	long itemp;
-	long k,kb,ic,scale,iloc;
-	
-	scale = rs[k2];
-	k = (scale-1)/2;
-	ic = k+1;
-
-	/* initial values */
-	iloc=1;
-	kb = (rs[k2-1]-1)/2;
-	nn1=(double)(kb-k);
-	nn2=nn1*nn1;
-	nn3=nn2*nn1;
-	nn4=nn2*nn2;
-	
-	if(k2 == 1){
-		i0 = 1;
-		y10=0;
-		y1i=0;
-		y1ii=0;
-		y1iii=0;
-		y1iv=0;
-	}else{
-		i0 = rs[k2-1]+1;
-		y10=loc_sum0[iloc];
-		y1i=loc_sum1[iloc]+loc_sum0[iloc]*nn1;
-		y1ii=loc_sum2[iloc]+2*loc_sum1[iloc]*nn1+loc_sum0[iloc]*nn2;
-		y1iii=loc_sum3[iloc]+3*loc_sum2[iloc]*nn1+3*loc_sum1[iloc]*nn2+loc_sum0[iloc]*nn3;
-		y1iv=loc_sum4[iloc]+4*loc_sum3[iloc]*nn1+6*loc_sum2[iloc]*nn2+4*loc_sum1[iloc]*nn3+loc_sum0[iloc]*nn4;
-	}
-
-	for(i=i0;i<=scale;i++){
-		y10 += y[i];
-		temp1 = y[i]*(double)(i-k-1);
-		y1i += temp1;
-		temp2 = temp1*(double)(i-k-1);
-		y1ii += temp2;
-		temp1 = temp2*(double)(i-k-1);
-		y1iii += temp1;
-		temp2 = temp1*(double)(i-k-1);
-		y1iv += temp2;
-	}
-	
-	loc_sum0[iloc]=y10;
-	loc_sum1[iloc]=y1i;
-	loc_sum2[iloc]=y1ii;
-	loc_sum3[iloc]=y1iii;
-	loc_sum4[iloc]=y1iv;
-	
-	
-	cmat((double)k);
-	
-	a0 = c1*y10+c2*y1ii+c3*y1iv;
-	temp1 = (y[ic] - a0);
-	f2 = temp1*temp1;
-
-	itemp = n-scale;
-
-	for(i=1;i<=itemp;i++){
-		if(i % i_refresh == 0){
-			iloc++;
-			if(k2 == 1){
-				i0 = 1;
-				y10=0;
-				y1i=0;
-				y1ii=0;
-				y1iii=0;
-				y1iv=0;
-			}else{
-				i0 = rs[k2-1]+1;
-				y10=loc_sum0[iloc];
-				y1i=loc_sum1[iloc]+loc_sum0[iloc]*nn1;
-				y1ii=loc_sum2[iloc]+2*loc_sum1[iloc]*nn1+loc_sum0[iloc]*nn2;
-				y1iii=loc_sum3[iloc]+3*loc_sum2[iloc]*nn1+3*loc_sum1[iloc]*nn2+loc_sum0[iloc]*nn3;
-				y1iv=loc_sum4[iloc]+4*loc_sum3[iloc]*nn1+6*loc_sum2[iloc]*nn2+4*loc_sum1[iloc]*nn3+loc_sum0[iloc]*nn4;
-			}
-			
-			for(j=i0;j<=scale;j++){
-				y10 += y[i+j];
-				temp1 = y[i+j]*(double)(j-k-1);
-				y1i += temp1;
-				temp2 = temp1*(double)(j-k-1);
-				y1ii += temp2;
-				temp1 = temp2*(double)(j-k-1);
-				y1iii += temp1;
-				temp2 = temp1*(double)(j-k-1);
-				y1iv += temp2;
-			}
-			loc_sum0[iloc]=y10;
-			loc_sum1[iloc]=y1i;
-			loc_sum2[iloc]=y1ii;
-			loc_sum3[iloc]=y1iii;
-			loc_sum4[iloc]=y1iv;
-		}else{
-			y00 = y10;
-			y0i = y1i;
-			y0ii = y1ii;
-			y0iii = y1iii;
-			y0iv = y1iv;
-
-			y10 = y00 + y[i+scale]-y[i];
-			temp1 = y[i]*(double)(k+1);
-			temp2 = y[i+scale]*(double)k;
-			y1i = y0i - y00 + temp1 + temp2;
-			temp1 = temp1*(double)(k+1);
-			temp2 = temp2*(double)k;
-			y1ii = y0ii - 2*y0i + y00 - temp1 + temp2;
-			temp1 = temp1*(double)(k+1);
-			temp2 = temp2*(double)k;
-			y1iii = y0iii - 3*y0ii + 3*y0i - y00 + temp1 + temp2;
-			y1iv = y0iv - 4*y0iii + 6* y0ii - 4 * y0i + y00 - temp1 *(double)(k+1) + temp2*(double)k;
-		}
-		
-		a0 = c1*y10+c2*y1ii+c3*y1iv;
-
-		temp1 = (y[i+ic] - a0);
-		f2 += temp1*temp1;
-	}
-
-	return f2/(double)(itemp+1);
-}
+        f2 = 0
+        
+    return f2
