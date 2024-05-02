@@ -5,43 +5,6 @@ from scipy.special import gamma
 from scipy.signal import savgol_filter
 
 
-def create_scales(
-        min_box: int,
-        max_box: int,
-        ratio: int = np.exp2(0.125)
-) -> np.array:
-    """Function that creates a list of scales in the
-    specified range.
-
-    Parameters
-    ----------
-    min_box: int
-        Minimum scale size.
-    max_box: int
-        Maximum scale size.
-    ratio: int, optional
-        Ratio between scales. Default: 2^(1/8)
-
-    Returns
-    -------
-        np.array
-            Numpy array with the calculated scales.
-    """
-    # Define maximum value based on the parameters
-    rslen = int(np.log10(max_box / min_box) / np.log10(ratio)) + 1
-    # Generate list of scales by multiplying the initial value by successive
-    # exponents of the ratio
-    rs = np.empty((rslen,))
-    rs[0] = min_box
-    rs[1:] = ratio
-    rs = np.cumprod(rs) + 0.5
-
-    # Select only the values in the defined range
-    rs = rs[rs < max_box]
-
-    return ((rs//2)*2+1).astype(np.int64)
-
-
 def detrending(
     series: np.array,
     s: int,
@@ -258,7 +221,7 @@ def read_file(
                     s,
                     order
                 )
-    return out
+    return out.astype(np.double)
 
 
 def time_split(signal: np.array, freq: str) -> list:

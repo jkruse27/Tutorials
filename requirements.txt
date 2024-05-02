@@ -1,8 +1,9 @@
 matplotlib
 scipy
 numpy
-sklearn
+scikit-learn
 pandas
 statsmodels
 keras
-tensorflow
+cython
+.
