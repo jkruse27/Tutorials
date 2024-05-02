@@ -97,12 +97,8 @@ cdef double[:] compute_dma(
     local_sum = np.empty((5, <long>(n/i_refresh)+1))
     f2 = np.empty(n_scales)
 
-    start = 0
-    if(order > 0):
-        start=1
-
     #with nogil:
-    for i in range(start, n_scales):
+    for i in range(0, n_scales):
         f2[i] = estimate_f2(series, scales, i, order, i_refresh, local_sum)
 
     return np.asarray(f2)
@@ -184,26 +180,29 @@ cdef double estimate_f2(
 
     elif(order == 2):
         iloc = 0
-        kb = <long> ((scales[index-1]-1)/2)
+        if(index != 0):
+            kb = <long> ((scales[index-1]-1)/2)
+        else:
+            kb = 1
         nn1 = <double>(kb-k)
         nn2 = nn1*nn1
 
-        if(index == 1):
+        if(index == 0):
             i0 = 0
             y10 = 0
             y1i = 0
             y1ii = 0
         else:
-            i0 = <long> (scales[index-1]+1)
+            i0 = <long> (scales[index-1])
             y10 = local_sums[0][iloc]
             y1i = local_sums[1][iloc]+local_sums[0][iloc]*nn1
             y1ii = local_sums[2][iloc]+2*local_sums[1][iloc]*nn1+local_sums[0][iloc]*nn2
 
-        for i in range(i0, scale+1):
+        for i in range(i0, scale):
             y10 += series[i]
-            temp1 = series[i]*<double>(i-k-1)
+            temp1 = series[i]*<double>(i-k)
             y1i += temp1;
-            temp2 = temp1*<double>(i-k-1)
+            temp2 = temp1*<double>(i-k)
             y1ii += temp2
 
         local_sums[0][iloc] = y10
@@ -212,15 +211,15 @@ cdef double estimate_f2(
 
         cmat(<double>k, order, c)
         a0 = c[0]*y10+c[1]*y1ii
-        temp1 = (series[ic] - a0)
+        temp1 = (series[k] - a0)
         f2 += temp1*temp1
         itemp = n-scale
 
-        for i in range(1, itemp):
-            if(i % i_refresh == 0):
-                iloc = iloc + 1
-                if(index == 1):
-                    i0 = 0
+        for i in range(0, itemp):
+            if((i+1) % i_refresh == 0):
+                iloc += 1
+                if(index == 0):
+                    i0 = 1
                     y10 = 0
                     y1i = 0
                     y1ii = 0
@@ -230,12 +229,13 @@ cdef double estimate_f2(
                     y1i = local_sums[1][iloc]+local_sums[0][iloc]*nn1
                     y1ii = local_sums[2][iloc]+2*local_sums[1][iloc]*nn1+local_sums[0][iloc]*nn2
                 
-                for j in range(i0, scale):
-                    y10 += series[i+j]
-                    temp1 = series[i+j]*<double>(j-k-1)
-                    y1i += temp1
-                    temp2 = temp1*<double>(j-k-1)
-                    y1ii += temp2
+                for j in range(i0, scale+1):
+                    if(i + j < n):
+                        y10 += series[i+j]
+                        temp1 = series[i+j]*<double>(j-k-1)
+                        y1i += temp1
+                        temp2 = temp1*<double>(j-k-1)
+                        y1ii += temp2
 
                 local_sums[0][iloc] = y10
                 local_sums[1][iloc] = y1i
@@ -250,11 +250,11 @@ cdef double estimate_f2(
                 temp2 = series[i+scale]*<double>k
                 y1i = y0i - y00 + temp1 + temp2
                 y1ii = y0ii - 2*y0i + y00 - temp1 *<double>(k+1) + temp2*<double>k
-            a0 = c[0]*y10+c[1]*y1ii;
 
+            a0 = c[0]*y10+c[1]*y1ii
             temp1 = (series[i+ic] - a0)
             f2 += temp1*temp1
-
+            
         f2 = f2/<double>(n)
 
     elif(order == 4):
