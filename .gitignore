@@ -3,4 +3,7 @@
 .pyc
 .html
 .obj
+.lib
+.pyd
+.exp
 *.egg-info/*
