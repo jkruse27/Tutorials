@@ -1,7 +1,5 @@
 import numpy as np
 import pandas as pd
-
-from scipy.special import gamma
 from scipy.signal import savgol_filter
 
 
@@ -260,82 +258,3 @@ def time_split(signal: np.array, freq: str) -> list:
     return [
         i.to_numpy().flatten() for _, i in split
     ][:-1]
-
-
-# ---- Still under work, I haven't properly tested. DON'T USE as is ----- #
-def non_gaussianity(series, s=32, order=3, q=0.25):
-    """Function that computes the value of the lambda parameter in the
-    intermittence model of cascaded processes.
-
-    Parameters
-    ----------
-    series : np.array
-        Time series to be evaluates
-    s : int, optional
-        Window to be used. Default: 32
-    order : int, optional
-        Order of the polynomial in the Savitsky-golay filter. Default: 3
-    q : float, optional
-        Order of the moment q that is going to be used to estimate lambda.
-        Default: 0.25
-    Returns
-    -------
-    float
-        Value of lambda
-    list
-        List with the distribution
-    """
-    series = np.cumsum(series-np.mean(series))
-
-    out = []
-
-    for i in range(0, len(series)-2*s, 2*s):
-        tmp = detrending(series[i:i+2*s], s, order)
-
-        out += list(tmp[s:]-tmp[:-s])
-
-    out = np.array(out)/np.std(out)
-    E = np.mean(np.array([abs(i)**q for i in out]))
-    k = (2/(q*(q-2)))
-    d = 2**(q/2)*gamma((q+1)/2)
-
-    return np.sqrt(abs(k*np.log(np.sqrt(np.pi)*E/d))), out
-
-
-def generalized_variance(series, scale, order):
-    """Function that calculates the generalized variance of a determined series
-    for a given scale and detrending order of the savitzky-golay filter
-    """
-    return np.sqrt(np.sum(
-                        detrending(
-                                  series,
-                                  scale,
-                                  order
-                                )**2
-    ))
-
-
-def dma(
-    series: np.array,
-    scales: list,
-    order: int = 4,
-) -> list:
-    """Function that receaves HRV data and detrends calculates the DMA
-    from it using Python code.
-
-    Parameters
-    ----------
-    series : np.array
-        Numpy array containing the HRV data.
-    scales : list
-        List with the scales to be analyzed.
-    order : int, optional
-        Order of the polynomial to be fit. Default: 4
-    Returns
-    -------
-    list
-        Values of the DMA for each of the given scales
-    """
-    series = np.cumsum(series-np.mean(series))
-
-    return [generalized_variance(series, 2*s, order) for s in scales]

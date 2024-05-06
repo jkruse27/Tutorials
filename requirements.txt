@@ -2,6 +2,7 @@ matplotlib
 scipy
 numpy
 scikit-learn
+pyarrow
 pandas
 statsmodels
 keras
