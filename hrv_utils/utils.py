@@ -51,6 +51,7 @@ def clean_dataset(
     threshold_min: int = 300,
     threshold_max: int = 1600,
     threshold_width: float = 0.2,
+    n_repetitions: int = 1,
     interpolation_method: str = 'linear'
 ) -> pd.DataFrame:
     """
@@ -78,6 +79,8 @@ def clean_dataset(
         or 10%-20% variation. If int, it is assumed as a difference in ms, if
         float between 0 and 1, it is assumed as a difference in percentages.
         Default: 300.
+    n_repetitions : int, optional
+        Number of times to repeat the cleaning process. Default: 1.
     interpolation_method : str, optional
         Method that will be used to interpolate the points. Any method accepted
         by pandas.DataFrame.interpolate can be used, although depending on the
@@ -89,19 +92,20 @@ def clean_dataset(
     new_series : pd.DataFrame
         Clean data.
     """
-    # Replace values with large differences by Nan
-    df['dRRI'] = (df[0].diff().fillna(0)).abs()
-    if (threshold_width <= 1):
-        thresholds = df.dRRI/df[0]
-        df.iloc[thresholds > threshold_width, 0] = np.NaN
-    else:
-        df.iloc[df.dRRI > threshold_width, 0] = np.NaN
+    for i in range(n_repetitions):
+        # Replace values with large differences by Nan
+        df['dRRI'] = (df[0].diff().fillna(0)).abs()
+        if (threshold_width <= 1):
+            thresholds = df.dRRI/df[0]
+            df.iloc[thresholds > threshold_width, 0] = np.NaN
+        else:
+            df.iloc[df.dRRI > threshold_width, 0] = np.NaN
 
-    # Replace values off the range by NaN
-    df[(df <= threshold_min) | (df >= threshold_max)] = np.NaN
+        # Replace values off the range by NaN
+        df[(df <= threshold_min) | (df >= threshold_max)] = np.NaN
 
-    # Interpolate all points that were replace by Nan
-    df = df.interpolate(method=interpolation_method)
+        # Interpolate all points that were replace by Nan
+        df = df.interpolate(method=interpolation_method)
 
     return df.drop(columns='dRRI').dropna()
 
@@ -155,6 +159,7 @@ def read_file(
     diff_rri: int = 0.2,
     detrending: bool = False,
     resampling_rate: int = 4,
+    n_repetitions: int = 1,
     clean_data=True
 ) -> dict:
     """Function that read HRV data from file cleans it if so required.
@@ -181,6 +186,8 @@ def read_file(
     resampling_rate : int, optional
         Determines the sampling rate in Hz to use to interpolate the signal.
         If None, the signal is not interpolated. Default: None
+    n_repetitions : int, optional
+        Number of times to repeat the cleaning process. Default: 1
     clean_data : bool, optional
         Whether or not to pre-process the dataset. Default: True
     Returns
@@ -207,7 +214,9 @@ def read_file(
             df,
             threshold_min=low_rri,
             threshold_max=high_rri,
-            threshold_width=diff_rri)
+            threshold_width=diff_rri,
+            n_repetitions=n_repetitions
+            )
 
     if (resampling_rate is not None):
         df = resample_hrv(df, resampling_rate)
