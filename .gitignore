@@ -7,3 +7,7 @@
 .pyd
 .exp
 *.egg-info/*
+.zip
+WFDB/*
+.hea
+.mat

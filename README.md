@@ -9,7 +9,7 @@ This repository contains a collection of tutorials that cover topics from data c
 - Non linear analysis
 - DMA
 - Non-gaussianity
-- Applications of deep learning
+- Applications of deep learning - Under work...
 
 ## Structure
 This repository is organized as follows:
