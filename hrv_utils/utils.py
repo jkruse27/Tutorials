@@ -90,9 +90,10 @@ def clean_dataset(
     new_series : pd.DataFrame
         Clean data.
     """
+    df = df.copy()
+    df['dRRI'] = (df[0].diff().fillna(0)).abs()
     for i in range(n_repetitions):
         # Replace values with large differences by Nan
-        df['dRRI'] = (df[0].diff().fillna(0)).abs()
         if (threshold_width <= 1):
             thresholds = df.dRRI/df[0]
             df.iloc[thresholds > threshold_width, 0] = np.NaN
@@ -100,10 +101,13 @@ def clean_dataset(
             df.iloc[df.dRRI > threshold_width, 0] = np.NaN
 
         # Replace values off the range by NaN
-        df[(df <= threshold_min) | (df >= threshold_max)] = np.NaN
+        df.iloc[
+            (df[0] <= threshold_min) | (df[0] >= threshold_max), 0
+            ] = np.NaN
 
         # Interpolate all points that were replace by Nan
         df = df.interpolate(method=interpolation_method)
+        df.loc[:, 'dRRI'] = (df[0].diff().fillna(0)).abs()
 
     return df.drop(columns='dRRI').dropna()
 
@@ -159,7 +163,7 @@ def read_file(
     resampling_rate: int = 4,
     n_repetitions: int = 1,
     clean_data=True
-) -> dict:
+) -> np.array:
     """Function that read HRV data from file cleans it if so required.
 
     Parameters
@@ -229,6 +233,110 @@ def read_file(
                     order
                 )
     return out.astype(np.double)
+
+
+def read_file_hourly(
+    filename: str,
+    initial_time: str,
+    s: int = 51,
+    order: int = 4,
+    low_rri: int = 300,
+    high_rri: int = 1600,
+    diff_rri: int = 0.2,
+    detrending: bool = False,
+    resampling_rate: int = 4,
+    n_repetitions: int = 1,
+    clean_data: bool = True,
+    offset: int = None
+) -> dict:
+    """Function that read HRV data from file, splits it
+     into hourly segments and cleans it if so required.
+
+    Parameters
+    ----------
+    filename : str or list
+        Name of the csv file containing the HRV data or list with the data
+    initial_time : str
+        Time to use as the origin of the recording
+    s : int, opt
+        Length of the splits for detrending. Default: 41
+    order : int, optional
+        Order of the polynomial to be fit. Default: 4
+    low_rri : int, optional
+        Minimum value allowed for RRI that is used in the preprocessing.
+        Default: 300
+    high_rri : int, optional
+        Maximum value allowed for RRI that is used in the preprocessing.
+        Default: 1600
+    diff_rri : int, optional
+        Maximum difference between successive RRI that is used in the
+        preprocessing. Default: 250
+    detrending : bool, optional
+        Determine whether detrending is applied or not. Default: False
+    resampling_rate : int, optional
+        Determines the sampling rate in Hz to use to interpolate the signal.
+        If None, the signal is not interpolated. Default: None
+    n_repetitions : int, optional
+        Number of times to repeat the cleaning process. Default: 1
+    clean_data : bool, optional
+        Whether or not to pre-process the dataset. Default: True
+    offset : int, optional
+        Amount in minutes to offset the initial position. Default: None.
+    Returns
+    -------
+    out : np.array
+        Numpy array with the time series.
+    """
+    # Read CSV containing the RRI intervals
+    if (isinstance(filename, str)):
+        df = pd.read_csv(filename, header=None)
+    else:
+        df = pd.DataFrame(filename)
+    df[0] = pd.to_numeric(df[0], 'coerce').interpolate()
+    # Generate time index from the data
+    df['Time'] = pd.to_datetime(
+        df[0].cumsum(),
+        unit='ms',
+        errors='coerce',
+        origin=initial_time
+    )
+
+    df = df.set_index('Time')
+
+    if (offset is not None):
+        df.index = df.index + pd.to_timedelta(offset, unit='min')
+
+    results = {}
+
+    for hour, series in df.groupby(pd.Grouper(freq='1h')):
+        # Clean dataset
+        if (clean_data):
+            series = clean_dataset(
+                series,
+                threshold_min=low_rri,
+                threshold_max=high_rri,
+                threshold_width=diff_rri,
+                n_repetitions=n_repetitions
+                )
+
+        if (resampling_rate is not None):
+            series = resample_hrv(series, resampling_rate)
+
+        out = series.to_numpy().flatten()
+        out = np.nan_to_num(out, nan=np.mean(out))
+
+        if (detrending and (len(out) > 2*s)):
+            out = detrending(
+                        out,
+                        s,
+                        order
+                    )
+
+        if ((hour.hour in results) and (len(out) < len(results[hour.hour]))):
+            pass
+        else:
+            results[hour.hour] = out.astype(np.double)
+    return results
 
 
 def time_split(signal: np.array, freq: str) -> list:
