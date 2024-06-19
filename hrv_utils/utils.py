@@ -1,3 +1,4 @@
+import re
 import numpy as np
 import pandas as pd
 from scipy.signal import savgol_filter
@@ -247,7 +248,9 @@ def read_file_hourly(
     resampling_rate: int = 4,
     n_repetitions: int = 1,
     clean_data: bool = True,
-    offset: int = None
+    offset: int = None,
+    freq: str = '1h',
+    overlap: float = 1
 ) -> dict:
     """Function that read HRV data from file, splits it
      into hourly segments and cleans it if so required.
@@ -282,6 +285,10 @@ def read_file_hourly(
         Whether or not to pre-process the dataset. Default: True
     offset : int, optional
         Amount in minutes to offset the initial position. Default: None.
+    freq : str, optional
+        String with the duration of each recording. Default: '1h'
+    overlap : float, optional
+        Float between 0 and 1 with the percentage of overlap. Default: 1
     Returns
     -------
     out : np.array
@@ -292,7 +299,9 @@ def read_file_hourly(
         df = pd.read_csv(filename, header=None)
     else:
         df = pd.DataFrame(filename)
+
     df[0] = pd.to_numeric(df[0], 'coerce').interpolate()
+
     # Generate time index from the data
     df['Time'] = pd.to_datetime(
         df[0].cumsum(),
@@ -308,34 +317,43 @@ def read_file_hourly(
 
     results = {}
 
-    for hour, series in df.groupby(pd.Grouper(freq='1h')):
-        # Clean dataset
-        if (clean_data):
-            series = clean_dataset(
-                series,
-                threshold_min=low_rri,
-                threshold_max=high_rri,
-                threshold_width=diff_rri,
-                n_repetitions=n_repetitions
-                )
+    sep = re.split(r'(\d+)', freq)
+    overlap = 1 - overlap
+    dt = pd.to_timedelta(int(sep[1]), unit=sep[2])*overlap
 
-        if (resampling_rate is not None):
-            series = resample_hrv(series, resampling_rate)
-
-        out = series.to_numpy().flatten()
-        out = np.nan_to_num(out, nan=np.mean(out))
-
-        if (detrending and (len(out) > 2*s)):
-            out = detrending(
-                        out,
-                        s,
-                        order
+    for step in range(int(int(sep[1])/overlap)):
+        for hour, series in df.groupby(pd.Grouper(freq=freq)):
+            hour = hour.hour+step*overlap
+            # Clean dataset
+            if (clean_data):
+                series = clean_dataset(
+                    series,
+                    threshold_min=low_rri,
+                    threshold_max=high_rri,
+                    threshold_width=diff_rri,
+                    n_repetitions=n_repetitions
                     )
 
-        if ((hour.hour in results) and (len(out) < len(results[hour.hour]))):
-            pass
-        else:
-            results[hour.hour] = out.astype(np.double)
+            if (resampling_rate is not None):
+                series = resample_hrv(series, resampling_rate)
+
+            out = series.to_numpy().flatten()
+            out = np.nan_to_num(out, nan=np.mean(out))
+
+            if (detrending and (len(out) > 2*s)):
+                out = detrending(
+                            out,
+                            s,
+                            order
+                        )
+
+            if ((hour in results) and (len(out) < len(results[hour]))):
+                pass
+            else:
+                results[hour] = out.astype(np.double)
+
+        df = df.iloc[np.argmax(df.index >= df.index[0]+dt):, :]
+        df.index = df.index - dt
     return results
 
 
