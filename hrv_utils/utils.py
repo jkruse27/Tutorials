@@ -239,12 +239,9 @@ def read_file(
 def read_file_hourly(
     filename: str,
     initial_time: str,
-    s: int = 51,
-    order: int = 4,
     low_rri: int = 300,
     high_rri: int = 1600,
     diff_rri: int = 0.2,
-    detrending: bool = False,
     resampling_rate: int = 4,
     n_repetitions: int = 1,
     clean_data: bool = True,
@@ -261,10 +258,6 @@ def read_file_hourly(
         Name of the csv file containing the HRV data or list with the data
     initial_time : str
         Time to use as the origin of the recording
-    s : int, opt
-        Length of the splits for detrending. Default: 41
-    order : int, optional
-        Order of the polynomial to be fit. Default: 4
     low_rri : int, optional
         Minimum value allowed for RRI that is used in the preprocessing.
         Default: 300
@@ -274,8 +267,6 @@ def read_file_hourly(
     diff_rri : int, optional
         Maximum difference between successive RRI that is used in the
         preprocessing. Default: 250
-    detrending : bool, optional
-        Determine whether detrending is applied or not. Default: False
     resampling_rate : int, optional
         Determines the sampling rate in Hz to use to interpolate the signal.
         If None, the signal is not interpolated. Default: None
@@ -320,40 +311,41 @@ def read_file_hourly(
     sep = re.split(r'(\d+)', freq)
     overlap = 1 - overlap
     dt = pd.to_timedelta(int(sep[1]), unit=sep[2])*overlap
+    window = pd.to_timedelta(int(sep[1]), unit=sep[2])
 
-    for step in range(int(int(sep[1])/overlap)):
-        for hour, series in df.groupby(pd.Grouper(freq=freq)):
-            hour = hour.hour+step*overlap
-            # Clean dataset
-            if (clean_data):
-                series = clean_dataset(
-                    series,
-                    threshold_min=low_rri,
-                    threshold_max=high_rri,
-                    threshold_width=diff_rri,
-                    n_repetitions=n_repetitions
-                    )
+    # Clean dataset
+    if (clean_data):
+        df = clean_dataset(
+            df,
+            threshold_min=low_rri,
+            threshold_max=high_rri,
+            threshold_width=diff_rri,
+            n_repetitions=n_repetitions
+            )
 
-            if (resampling_rate is not None):
-                series = resample_hrv(series, resampling_rate)
+    if (resampling_rate is not None):
+        df = resample_hrv(df, resampling_rate)
 
-            out = series.to_numpy().flatten()
+    step = df.index[0]-(df.index[0].minute*pd.to_timedelta(1, unit='min'))
+    hour = step.hour
+
+    while(df.index[0] >= step):
+        start = np.argmax(df.index >= step)
+        end = np.argmax(df.index[start:] >= step+window)+start
+
+        out = df.iloc[start:end, :]
+
+        if(len(out)):
+            out = out.to_numpy().flatten()
             out = np.nan_to_num(out, nan=np.mean(out))
 
-            if (detrending and (len(out) > 2*s)):
-                out = detrending(
-                            out,
-                            s,
-                            order
-                        )
-
-            if ((hour in results) and (len(out) < len(results[hour]))):
-                pass
-            else:
+            if (hour not in results):
                 results[hour] = out.astype(np.double)
 
-        df = df.iloc[np.argmax(df.index >= df.index[0]+dt):, :]
-        df.index = df.index - dt
+        hour += overlap*int(sep[1])
+        step += dt
+        df = df.iloc[np.argmax(df.index >= step):, :]
+
     return results
 
 
