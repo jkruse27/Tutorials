@@ -11,3 +11,6 @@
 WFDB/*
 .hea
 .mat
+build/*
+*.c
+*.html
