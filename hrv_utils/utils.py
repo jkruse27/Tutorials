@@ -329,13 +329,13 @@ def read_file_hourly(
     step = df.index[0]-(df.index[0].minute*pd.to_timedelta(1, unit='min'))
     hour = step.hour
 
-    while(df.index[0] >= step):
+    while (df.index[0] >= step):
         start = np.argmax(df.index >= step)
         end = np.argmax(df.index[start:] >= step+window)+start
 
         out = df.iloc[start:end, :]
 
-        if(len(out)):
+        if (len(out)):
             out = out.to_numpy().flatten()
             out = np.nan_to_num(out, nan=np.mean(out))
 
