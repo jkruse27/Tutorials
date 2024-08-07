@@ -2,6 +2,7 @@ import re
 import numpy as np
 import pandas as pd
 from scipy.signal import savgol_filter
+from scipy import interpolate
 
 
 def detrending(
@@ -49,9 +50,7 @@ def clean_dataset(
     df: pd.DataFrame,
     threshold_min: int = 300,
     threshold_max: int = 1600,
-    threshold_width: float = 0.2,
-    n_repetitions: int = 1,
-    interpolation_method: str = 'linear'
+    max_diff: float = 0.2,
 ) -> pd.DataFrame:
     """
     Function that cleans the HRV data by removing outliers and adjacent points
@@ -71,15 +70,13 @@ def clean_dataset(
         Maximum accepted value for an RRI interval. Points above this are
         removed. Due to physical limitations, it's usually between 1500-2000ms.
         Default: 1600.
-    threshold_width : int, optional
+    max_diff : int, optional
         Maximum accepted difference between adjacent RRI intervals. Points that
         have a difference over this when compared to the previous one are
         discarded. Due to physical limitations, it's usually between 200-400ms,
         or 10%-20% variation. If int, it is assumed as a difference in ms, if
         float between 0 and 1, it is assumed as a difference in percentages.
         Default: 300.
-    n_repetitions : int, optional
-        Number of times to repeat the cleaning process. Default: 1.
     interpolation_method : str, optional
         Method that will be used to interpolate the points. Any method accepted
         by pandas.DataFrame.interpolate can be used, although depending on the
@@ -91,26 +88,49 @@ def clean_dataset(
     new_series : pd.DataFrame
         Clean data.
     """
-    df = df.copy()
-    df['dRRI'] = (df[0].diff().fillna(0)).abs()
-    for i in range(n_repetitions):
-        # Replace values with large differences by Nan
-        if (threshold_width <= 1):
-            thresholds = df.dRRI/df[0]
-            df.iloc[thresholds > threshold_width, 0] = np.NaN
-        else:
-            df.iloc[df.dRRI > threshold_width, 0] = np.NaN
+    dRRI = df[0].diff().fillna(0).abs()
+    RRI = df.values.flatten()
+    N = len(RRI)
 
-        # Replace values off the range by NaN
-        df.iloc[
-            (df[0] <= threshold_min) | (df[0] >= threshold_max), 0
-            ] = np.NaN
+    if (max_diff <= 1):
+        difference = dRRI/RRI > max_diff
+    else:
+        difference = dRRI > max_diff
 
-        # Interpolate all points that were replace by Nan
-        df = df.interpolate(method=interpolation_method)
-        df.loc[:, 'dRRI'] = (df[0].diff().fillna(0)).abs()
+    out_of_bounds = (RRI > threshold_max) | (RRI < threshold_min)
+    corrections = difference | out_of_bounds
 
-    return df.drop(columns='dRRI').dropna()
+    for i in zip(*np.where(corrections == 1)):
+        i = i[0]
+        if (i >= N-1 or i == 0):
+            continue
+
+        max_dt = max_diff*RRI[i] if max_diff <= 1 else max_diff
+        max_dt = np.abs(max_dt)
+
+        if ((RRI[i-1]-RRI[i]) > max_dt):
+            # Ventricular premature contraction (VPC)
+            if RRI[i+1] > RRI[i-1]:
+                new = (RRI[i]+RRI[i+1])/2
+                RRI[i] = new
+                RRI[i+1] = new
+            # Supraventricular premature contraction (SVPC)
+            else:
+                RRI[i] = (RRI[i]+RRI[i+1])/2
+
+        if (RRI[i]-RRI[i-1]) > max_dt:
+            # The omission of detecting R-R wave
+            RRI[i] = (RRI[i-1] + RRI[i+1]) / 2
+
+        if RRI[i] < threshold_min:
+            RRI[i] = (RRI[i-1] + RRI[i+1]) / 2
+
+        if RRI[i] > threshold_max:
+            RRI[i] = (RRI[i-1] + RRI[i+1]) / 2
+
+    df[0] = RRI
+
+    return df.iloc[1:-1, :]
 
 
 def resample_hrv(
@@ -138,19 +158,22 @@ def resample_hrv(
     window = int(fs*(signal.index[-1]-signal.index[0]).total_seconds())
     start = signal.index[0]
     t = [start + pd.Timedelta(x/fs, 's') for x in range(window)]
-    df = pd.DataFrame(t, columns=['Time'])
-    df = df.set_index('Time')
-    df['inter'] = 1
 
-    df = df.merge(signal, how='outer', left_index=True, right_index=True)
-
-    sel = df.inter == 1
-
+    # Cumsum to obtain the total time until each point
+    time = np.cumsum(signal.values, dtype=int)
+    # Insert 0 at the beginning corresponding to start time
+    time = np.insert(time, 0, 0)
+    # add RRI[0] as an initial data (RRI[0]=RRI[1])
+    RRI = np.insert(signal.values, 0, signal.values[0])
+    # Generate new resampled points
+    time2 = np.linspace(0, time[-1], window)
     # Interpolate data
-    df = df.interpolate('time')
+    f = interpolate.interp1d(time, RRI)
+    # Resample with new resampled points
+    RRI_resampled = np.array(f(time2), dtype=np.float32)
 
-    # Select only the points that were interpolated
-    return df[sel].drop(columns=['inter'])
+    # Return this new timestamps with the time index
+    return pd.DataFrame(RRI_resampled, index=t)
 
 
 def read_file(
@@ -162,7 +185,6 @@ def read_file(
     diff_rri: int = 0.2,
     detrending: bool = False,
     resampling_rate: int = 4,
-    n_repetitions: int = 1,
     clean_data=True
 ) -> np.array:
     """Function that read HRV data from file cleans it if so required.
@@ -189,8 +211,6 @@ def read_file(
     resampling_rate : int, optional
         Determines the sampling rate in Hz to use to interpolate the signal.
         If None, the signal is not interpolated. Default: None
-    n_repetitions : int, optional
-        Number of times to repeat the cleaning process. Default: 1
     clean_data : bool, optional
         Whether or not to pre-process the dataset. Default: True
     Returns
@@ -217,8 +237,7 @@ def read_file(
             df,
             threshold_min=low_rri,
             threshold_max=high_rri,
-            threshold_width=diff_rri,
-            n_repetitions=n_repetitions
+            max_diff=diff_rri
             )
 
     if (resampling_rate is not None):
@@ -243,7 +262,6 @@ def read_file_hourly(
     high_rri: int = 1600,
     diff_rri: int = 0.2,
     resampling_rate: int = 4,
-    n_repetitions: int = 1,
     clean_data: bool = True,
     offset: int = None,
     freq: str = '1h',
@@ -270,8 +288,6 @@ def read_file_hourly(
     resampling_rate : int, optional
         Determines the sampling rate in Hz to use to interpolate the signal.
         If None, the signal is not interpolated. Default: None
-    n_repetitions : int, optional
-        Number of times to repeat the cleaning process. Default: 1
     clean_data : bool, optional
         Whether or not to pre-process the dataset. Default: True
     offset : int, optional
@@ -319,8 +335,7 @@ def read_file_hourly(
             df,
             threshold_min=low_rri,
             threshold_max=high_rri,
-            threshold_width=diff_rri,
-            n_repetitions=n_repetitions
+            max_diff=diff_rri
             )
 
     if (resampling_rate is not None):
