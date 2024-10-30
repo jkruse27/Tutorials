@@ -1,13 +1,36 @@
 import numpy as np
-import math
 from scipy.special import gamma
 from scipy.signal import savgol_filter
 
 
+def renormalize(
+        x: np.array,
+        std: float,
+        mu: float) -> np.array:
+    """Function that transforms a signal x with a certain 
+    distribution so that is has standard deviation std and mean mu.
+
+    Parameters
+    ----------
+    x : np.array
+        Original signal to be transformed
+    std : float
+        New standard deviation
+    mu : float
+        New mean
+
+    Returns
+    -------
+    np.array
+        Transformed signal with standard deviation std and mean mu
+    """
+    return (x - np.mean(x)) / np.std(x) * std - mu
+
+
 def generate_nongaussian(
         m: int,
-        variance: float,
-        limit: int = None
+        lmd2: float,
+        n0: int
 ) -> np.array:
     """Function that generates a series with nongaussianity
     given by the provided variance.
@@ -17,38 +40,37 @@ def generate_nongaussian(
     m : int
         Number of levels of cascading. The final series will have
         length 2^m
-    variance : float
-        Variance of the nongaussianity
-    limit : int, optional
-        If you want a series with 2^m samples but only want k
-        cascaded steps, set limit to k. The value None results in
-        using all steps. Default: None
+    lmd2 : float
+        Nongaussian index
+    n0 : int
+        Initial number of samples from which m layers will be applied.
+        The final length of the series will be n0*2^m
 
     Returns
     -------
     new_series : np.array
-        Nongaussian signal with length 2^m
+        Nongaussian signal with length n0*2^m
     """
-    if (limit is None):
-        limit = m
+    lmd2e = lmd2 / m
+    lmd0 = np.sqrt(lmd2e)
 
-    samples = 2**m
-    std = np.sqrt(variance/m)
+    x = np.exp(np.sum(
+            np.array(
+                [
+                    np.repeat(
+                        renormalize(
+                            np.random.normal(size=n0*2**i),
+                            lmd0,
+                            lmd2e
+                        ),
+                        2**(m-i)
+                    )
+                    for i in range(m)
+                ]),
+            axis=0
+    ))
 
-    series = np.random.default_rng().normal(0, 1, samples)
-
-    r = [
-        np.random.default_rng().normal(0, std, 2**j)
-        for j in range(1, limit)
-    ]
-
-    Y = np.exp(np.array([
-        np.sum([r[k-1][math.floor(j/(2**(m-k)))]
-                for k in range(1, limit)])
-        for j in range(2**m)
-    ]))
-
-    return series*Y
+    return np.random.normal(size=len(x)) * x
 
 
 def nongaussian_index(x: np.array, q: float) -> float:
@@ -118,6 +140,7 @@ def nongaussian_analysis(
     y = np.cumsum(series - np.mean(series))
 
     nongaussianity = []
+    curves = []
 
     for s in scales:
         e = y - savgol_filter(y, s, m)
@@ -126,8 +149,9 @@ def nongaussian_analysis(
         dy = dy/np.std(dy)
 
         nongaussianity.append(nongaussian_index(dy, q))
+        curves.append(dy)
 
-    return nongaussianity
+    return nongaussianity, curves
 
 
 # This code was taken from https://github.com/mlcs/iaaft
