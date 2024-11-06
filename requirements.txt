@@ -6,5 +6,4 @@ pyarrow
 pandas
 statsmodels
 keras
-cython
-.
+Cython
