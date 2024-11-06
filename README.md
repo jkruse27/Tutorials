@@ -26,7 +26,7 @@ Using Python environments (such as those in venvs or conda) is recommended to ke
 The requirements.txt file contains all python packages that are required throughout the tutorial, and it can be installed by running the command:
 
 ```
-pip install  --user -r requirements.txt
+pip install git+https://github.com/jkruse27/Tutorials.git
 ```
 
 This package contains some main functions such as:
