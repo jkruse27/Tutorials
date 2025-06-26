@@ -221,14 +221,13 @@ def read_file(
         df = pd.read_csv(filename, header=None)
     else:
         df = pd.DataFrame(filename)
-    timestamps = np.cumsum(df.to_numpy())
+
     df[0] = pd.to_numeric(df[0], 'coerce').interpolate()
+    timestamps = np.cumsum(df[0])
+
     # Generate time index from the data
     df['Time'] = pd.to_datetime(df[0].cumsum(), unit='ms', errors='coerce')
     df = df.set_index('Time')
-    df = df[
-        df.index <= df.index[0]+pd.to_timedelta(23, unit='h', errors='coerce')
-        ]
 
     # Clean dataset
     if (clean_data):
