@@ -135,7 +135,8 @@ def clean_dataset(
 
 def resample_hrv(
     signal: pd.DataFrame,
-    fs: int
+    fs: int,
+    timestamps : np.array = None
 ) -> pd.DataFrame:
     """
     Function that resamples the dataset so that all points are evaluated with
@@ -148,29 +149,26 @@ def resample_hrv(
         data as the index.
     fs : int
         Sampling rate in Hz that the series will be interpolated by
+    timestamps : np.array
+        Array with the time stamps
 
     Returns
     -------
     new_series : pd.DataFrame
         Interpolated data.
     """
-    # Generate new time points in which the data will be interpolated
-    window = int(fs*(signal.index[-1]-signal.index[0]).total_seconds())
     start = signal.index[0]
-    t = [start + pd.Timedelta(x/fs, 's') for x in range(window)]
 
-    # Cumsum to obtain the total time until each point
-    time = np.cumsum(signal.values, dtype=int)
-    # Insert 0 at the beginning corresponding to start time
-    time = np.insert(time, 0, 0)
-    # add RRI[0] as an initial data (RRI[0]=RRI[1])
+    if (timestamps is None):
+        timestamps = np.cumsum(signal.values, dtype=int)
+
+    timestamps = np.insert(timestamps, 0, 0)
     RRI = np.insert(signal.values, 0, signal.values[0])
-    # Generate new resampled points
-    time2 = np.linspace(0, time[-1], window)
-    # Interpolate data
-    f = interpolate.interp1d(time, RRI)
-    # Resample with new resampled points
-    RRI_resampled = np.array(f(time2), dtype=np.float32)
+    new_time = np.arange(0, timestamps[-1], 1000*fs)
+    f = interpolate.interp1d(timestamps, RRI)
+    RRI_resampled = np.array(f(new_time), dtype=np.float32)
+
+    t = [start + pd.Timedelta(x/fs, 's') for x in new_time]
 
     # Return this new timestamps with the time index
     return pd.DataFrame(RRI_resampled, index=t)
@@ -223,6 +221,7 @@ def read_file(
         df = pd.read_csv(filename, header=None)
     else:
         df = pd.DataFrame(filename)
+    timestamps = np.cumsum(df.to_numpy())
     df[0] = pd.to_numeric(df[0], 'coerce').interpolate()
     # Generate time index from the data
     df['Time'] = pd.to_datetime(df[0].cumsum(), unit='ms', errors='coerce')
@@ -241,7 +240,7 @@ def read_file(
             )
 
     if (resampling_rate is not None):
-        df = resample_hrv(df, resampling_rate)
+        df = resample_hrv(df, resampling_rate, timestamps)
 
     out = df.to_numpy().flatten()
     out = np.nan_to_num(out, nan=np.mean(out))
