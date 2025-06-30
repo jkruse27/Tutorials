@@ -130,7 +130,7 @@ def clean_dataset(
 
     df[0] = RRI
 
-    return df.iloc[1:-1, :]
+    return df.iloc[:, :]
 
 
 def resample_hrv(
@@ -164,7 +164,7 @@ def resample_hrv(
 
     timestamps = np.insert(timestamps, 0, 0)
     RRI = np.insert(signal.values, 0, signal.values[0])
-    new_time = np.arange(0, timestamps[-1], 1000*fs)
+    new_time = np.arange(0, timestamps[-1], 1000/fs)
     f = interpolate.interp1d(timestamps, RRI)
     RRI_resampled = np.array(f(new_time), dtype=np.float32)
 
