@@ -170,7 +170,6 @@ def resample_hrv(
 
     t = [start + pd.Timedelta(x/fs, 's') for x in new_time]
 
-    # Return this new timestamps with the time index
     return pd.DataFrame(RRI_resampled, index=t)
 
 
@@ -216,7 +215,6 @@ def read_file(
     out : np.array
         Numpy array with the time series.
     """
-    # Read CSV containing the RRI intervals
     if (isinstance(filename, str)):
         df = pd.read_csv(filename, header=None)
     else:
@@ -225,11 +223,9 @@ def read_file(
     df[0] = pd.to_numeric(df[0], 'coerce').interpolate()
     timestamps = np.cumsum(df[0])
 
-    # Generate time index from the data
     df['Time'] = pd.to_datetime(df[0].cumsum(), unit='ms', errors='coerce')
     df = df.set_index('Time')
 
-    # Clean dataset
     if (clean_data):
         df = clean_dataset(
             df,
@@ -299,7 +295,6 @@ def read_file_hourly(
     out : np.array
         Numpy array with the time series.
     """
-    # Read CSV containing the RRI intervals
     if (isinstance(filename, str)):
         df = pd.read_csv(filename, header=None)
     else:
@@ -307,7 +302,6 @@ def read_file_hourly(
 
     df[0] = pd.to_numeric(df[0], 'coerce').interpolate()
 
-    # Generate time index from the data
     df['Time'] = pd.to_datetime(
         df[0].cumsum(),
         unit='ms',
@@ -327,7 +321,6 @@ def read_file_hourly(
     dt = pd.to_timedelta(int(sep[1]), unit=sep[2])*overlap
     window = pd.to_timedelta(int(sep[1]), unit=sep[2])
 
-    # Clean dataset
     if (clean_data):
         df = clean_dataset(
             df,
@@ -381,11 +374,8 @@ def time_split(signal: np.array, freq: str) -> list:
             index=pd.to_datetime(np.cumsum(signal), unit='ms')
             )
 
-    # Split data into 5min segments
     split = df.groupby(pd.Grouper(freq=freq))
 
-    # Save each segment as a numpy array
-    # (Only segments with over 4.5min are selected)
     return [
         i.to_numpy().flatten() for _, i in split
-    ][:-1]
+    ]
