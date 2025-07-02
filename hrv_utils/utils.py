@@ -51,6 +51,7 @@ def clean_dataset(
     threshold_min: int = 300,
     threshold_max: int = 1600,
     max_diff: float = 0.2,
+    repetitions: int = 1,
 ) -> pd.DataFrame:
     """
     Function that cleans the HRV data by removing outliers and adjacent points
@@ -77,58 +78,56 @@ def clean_dataset(
         or 10%-20% variation. If int, it is assumed as a difference in ms, if
         float between 0 and 1, it is assumed as a difference in percentages.
         Default: 300.
-    interpolation_method : str, optional
-        Method that will be used to interpolate the points. Any method accepted
-        by pandas.DataFrame.interpolate can be used, although depending on the
-        size of the data, methods that are not the 'linear' one can be very
-        slow. Default: 'linear'.
+    repetitions : int, optional
+        Number of times the cleaning process will be repeated.
 
     Returns
     -------
     new_series : pd.DataFrame
         Clean data.
     """
-    dRRI = df[0].diff().fillna(0).abs()
-    RRI = df.values.flatten()
-    N = len(RRI)
-
-    if (max_diff <= 1):
-        difference = dRRI/RRI > max_diff
-    else:
-        difference = dRRI > max_diff
-
-    out_of_bounds = (RRI > threshold_max) | (RRI < threshold_min)
-    corrections = difference | out_of_bounds
-
-    for i in zip(*np.where(corrections == 1)):
-        i = i[0]
-        if (i >= N-1 or i == 0):
-            continue
-
-        max_dt = max_diff*RRI[i] if max_diff <= 1 else max_diff
-        max_dt = np.abs(max_dt)
-
-        if ((RRI[i-1]-RRI[i]) > max_dt):
-            # Ventricular premature contraction (VPC)
-            if RRI[i+1] > RRI[i-1]:
-                new = (RRI[i]+RRI[i+1])/2
-                RRI[i] = new
-                RRI[i+1] = new
-            # Supraventricular premature contraction (SVPC)
-            else:
-                RRI[i] = (RRI[i]+RRI[i+1])/2
-
-        if (RRI[i]-RRI[i-1]) > max_dt:
-            # The omission of detecting R-R wave
-            RRI[i] = (RRI[i-1] + RRI[i+1]) / 2
-
-        if RRI[i] < threshold_min:
-            RRI[i] = (RRI[i-1] + RRI[i+1]) / 2
-
-        if RRI[i] > threshold_max:
-            RRI[i] = (RRI[i-1] + RRI[i+1]) / 2
-
-    df[0] = RRI
+    for i in range(repetitions):
+        dRRI = df[0].diff().fillna(0).abs()
+        RRI = df.values.flatten()
+        N = len(RRI)
+    
+        if (max_diff <= 1):
+            difference = dRRI/RRI > max_diff
+        else:
+            difference = dRRI > max_diff
+    
+        out_of_bounds = (RRI > threshold_max) | (RRI < threshold_min)
+        corrections = difference | out_of_bounds
+    
+        for i in zip(*np.where(corrections == 1)):
+            i = i[0]
+            if (i >= N-1 or i == 0):
+                continue
+    
+            max_dt = max_diff*RRI[i] if max_diff <= 1 else max_diff
+            max_dt = np.abs(max_dt)
+    
+            if ((RRI[i-1]-RRI[i]) > max_dt):
+                # Ventricular premature contraction (VPC)
+                if RRI[i+1] > RRI[i-1]:
+                    new = (RRI[i]+RRI[i+1])/2
+                    RRI[i] = new
+                    RRI[i+1] = new
+                # Supraventricular premature contraction (SVPC)
+                else:
+                    RRI[i] = (RRI[i]+RRI[i+1])/2
+    
+            if (RRI[i]-RRI[i-1]) > max_dt:
+                # The omission of detecting R-R wave
+                RRI[i] = (RRI[i-1] + RRI[i+1]) / 2
+    
+            if RRI[i] < threshold_min:
+                RRI[i] = (RRI[i-1] + RRI[i+1]) / 2
+    
+            if RRI[i] > threshold_max:
+                RRI[i] = (RRI[i-1] + RRI[i+1]) / 2
+    
+        df[0] = RRI
 
     return df.iloc[:, :]
 
