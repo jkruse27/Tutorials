@@ -181,7 +181,8 @@ def read_file(
     diff_rri: int = 0.2,
     detrending: bool = False,
     resampling_rate: int = 4,
-    clean_data=True
+    clean_data: bool = True,
+    repetitions: int = 1
 ) -> np.array:
     """Function that read HRV data from file cleans it if so required.
 
@@ -209,6 +210,8 @@ def read_file(
         If None, the signal is not interpolated. Default: None
     clean_data : bool, optional
         Whether or not to pre-process the dataset. Default: True
+    repetitions : int, optional
+        Number of times the cleaning process will be repeated.
     Returns
     -------
     out : np.array
@@ -230,7 +233,8 @@ def read_file(
             df,
             threshold_min=low_rri,
             threshold_max=high_rri,
-            max_diff=diff_rri
+            max_diff=diff_rri,
+            repetitions=repetitions
             )
 
     if (resampling_rate is not None):
@@ -258,7 +262,8 @@ def read_file_hourly(
     clean_data: bool = True,
     offset: int = None,
     freq: str = '1h',
-    overlap: float = 1
+    overlap: float = 1,
+    repetitions: int = 1
 ) -> dict:
     """Function that read HRV data from file, splits it
      into hourly segments and cleans it if so required.
@@ -289,6 +294,8 @@ def read_file_hourly(
         String with the duration of each recording. Default: '1h'
     overlap : float, optional
         Float between 0 and 1 with the percentage of overlap. Default: 1
+    repetitions : int, optional
+        Number of times the cleaning process will be repeated.
     Returns
     -------
     out : np.array
@@ -325,7 +332,8 @@ def read_file_hourly(
             df,
             threshold_min=low_rri,
             threshold_max=high_rri,
-            max_diff=diff_rri
+            max_diff=diff_rri,
+            repetitions=repetitions
             )
 
     if (resampling_rate is not None):
