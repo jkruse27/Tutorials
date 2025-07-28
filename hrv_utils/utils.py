@@ -86,7 +86,7 @@ def clean_dataset(
     new_series : pd.DataFrame
         Clean data.
     """
-    for i in range(repetitions):
+    for iteration in range(repetitions):
         dRRI = df[0].diff().fillna(0).abs()
         RRI = df.values.flatten()
         N = len(RRI)
