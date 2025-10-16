@@ -83,13 +83,13 @@ def clean_dataset(
     new_series : pd.DataFrame
         Clean data.
     """
-    RRI = df.values
+    RRI = df.values.T[0]
     percentage = max_diff < 1
     for ii in range(len(RRI)-1):
         diff = RRI[ii-1]-RRI[ii]
 
         if(percentage):
-            diff /= min(RRI[ii], RRI[ii-1])
+            diff = diff / min(RRI[ii], RRI[ii-1])
 
         if(diff > max_diff):
             # Ventricular premature contraction (VPC)
@@ -102,7 +102,7 @@ def clean_dataset(
 
         diff = RRI[ii]-RRI[ii-1]
         if(percentage):
-            diff /= min(RRI[ii], RRI[ii-1])
+            diff = diff / min(RRI[ii], RRI[ii-1])
 
         if(diff > max_diff):
             # The omission of detecting R-R wave
@@ -114,7 +114,7 @@ def clean_dataset(
         if(RRI[ii] > threshold_max):
             RRI[ii] = (RRI[ii-1] + RRI[ii+1]) / 2
     
-    df.values = RRI
+    df[df.columns[0]] = RRI.reshape(df.values.shape)
 
     return df.iloc[:, :]
 
@@ -168,8 +168,7 @@ def read_file(
     diff_rri: int = 0.2,
     detrending: bool = False,
     resampling_rate: int = 4,
-    clean_data: bool = True,
-    repetitions: int = 1
+    clean_data: bool = True
 ) -> np.array:
     """Function that read HRV data from file cleans it if so required.
 
@@ -220,8 +219,7 @@ def read_file(
             df,
             threshold_min=low_rri,
             threshold_max=high_rri,
-            max_diff=diff_rri,
-            repetitions=repetitions
+            max_diff=diff_rri
             )
 
     if (resampling_rate is not None):
@@ -242,15 +240,14 @@ def read_file(
 def read_file_hourly(
     filename: str,
     initial_time: str,
-    low_rri: int = 300,
-    high_rri: int = 1600,
+    low_rri: int = 350,
+    high_rri: int = 1500,
     diff_rri: int = 0.2,
     resampling_rate: int = 4,
     clean_data: bool = True,
     offset: int = None,
     freq: str = '1h',
-    overlap: float = 1,
-    repetitions: int = 1
+    overlap: float = 1
 ) -> dict:
     """Function that read HRV data from file, splits it
      into hourly segments and cleans it if so required.
@@ -281,8 +278,6 @@ def read_file_hourly(
         String with the duration of each recording. Default: '1h'
     overlap : float, optional
         Float between 0 and 1 with the percentage of overlap. Default: 1
-    repetitions : int, optional
-        Number of times the cleaning process will be repeated.
     Returns
     -------
     out : np.array
@@ -319,8 +314,7 @@ def read_file_hourly(
             df,
             threshold_min=low_rri,
             threshold_max=high_rri,
-            max_diff=diff_rri,
-            repetitions=repetitions
+            max_diff=diff_rri
             )
 
     if (resampling_rate is not None):
