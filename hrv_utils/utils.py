@@ -50,7 +50,7 @@ def clean_dataset(
     df: pd.DataFrame,
     threshold_min: int = 350,
     threshold_max: int = 1500,
-    max_diff: float = 0.2,
+    max_diff: float = 200,
 ) -> pd.DataFrame:
     """
     Function that cleans the HRV data by removing outliers and adjacent points
@@ -76,7 +76,7 @@ def clean_dataset(
         discarded. Due to physical limitations, it's usually between 200-400ms,
         or 10%-20% variation. If int, it is assumed as a difference in ms, if
         float between 0 and 1, it is assumed as a difference in percentages.
-        Default: 0.2.
+        Default: 200.
 
     Returns
     -------
