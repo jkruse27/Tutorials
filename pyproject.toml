@@ -1,0 +1,4 @@
+[build-system]
+# These are packages needed to RUN setup.py
+requires = ["setuptools", "wheel", "Cython", "numpy"]
+build-backend = "setuptools.build_meta"
