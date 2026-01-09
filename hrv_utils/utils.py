@@ -2,345 +2,170 @@ import re
 import numpy as np
 import pandas as pd
 from scipy.signal import savgol_filter
-from scipy import interpolate
+from hrv_utils import rri_utils
 
 
-def detrending(
-    series: np.array,
-    s: int,
-    order: int = 2
-) -> np.array:
-    """Function that performs savitsky-golay filter detrending in a time
-    series. We start by integrating the series, then for each non-overlapping
-    interval of length `s`, a polynomial of order `order` is fit to that
-    interval and subtracted from the raw series. The returned series is then
-    the original series with each interval detrended by the savitsky golay
-    approximation.
+def parse_time_string(t_str):
+    """Parses 'HH:MM:SS' string into float hours."""
+    if t_str is None:
+        return 0.0
+    try:
+        parts = t_str.split(':')
+        h = float(parts[0])
+        m = float(parts[1]) if len(parts) > 1 else 0.0
+        s = float(parts[2]) if len(parts) > 2 else 0.0
+        return h + m/60.0 + s/3600.0
+    except Exception:
+        return 0.0
+
+
+def parse_freq_to_hours(freq_str):
+    """Converts frequency strings like '1h', '30min' to float hours."""
+    sep = re.split(r'(\d+)', freq_str)
+    val = float(sep[1])
+    unit = sep[2].lower()
+
+    if unit in ['h', 'hour', 'hours']:
+        return val
+    elif unit in ['m', 'min', 't', 'mins']:
+        return val / 60.0
+    elif unit in ['s', 'sec', 'second']:
+        return val / 3600.0
+    else:
+        raise ValueError(f"Unknown time unit: {unit}")
+
+
+def detrend_signal(
+    signal: np.ndarray, s: int = 51, order: int = 4
+) -> np.ndarray:
+    """
+    Detrends the signal using a Savitzky-Golay filter to estimate the trend.
 
     Parameters
     ----------
-    series : np.array
-        Raw time series as a numpy array.
+    signal : np.ndarray
+        The input signal (RRI).
     s : int
-        Length of the splits for detrending. Should be an odd number.
-    order : int, optional
-        Order of the polynomial to be fit. Should be an even number. Default: 2
+        Window length for the filter (must be odd).
+    order : int
+        The order of the polynomial used to fit the samples.
 
     Returns
     -------
-    new_series : np.array
-        Detrended np.array with the same shape as the original data.
-
-    Notes
-    -----
-    It follows the algorithm described in [1]_.
-
-    References
-    ----------
-    .. [1] Kiyono, K., Struzik, Z. R., Aoyagi, N., & Yamamoto, Y. (2006).
-    Multiscale probability density function analysis: non-Gaussian and
-    scale-invariant fluctuations of healthy human heart rate. IEEE
-    transactions on bio-medical engineering, 53(1), 95–102.
-    https://doi.org/10.1109/TBME.2005.859804
+    np.ndarray
+        The detrended signal (signal - trend).
     """
-    return (series-savgol_filter(series, s, order))
+    if s % 2 == 0:
+        s += 1
+    if s <= order:
+        raise ValueError(f"s ({s}) must be greater than poly order ({order})")
 
+    trend = savgol_filter(signal, window_length=s, polyorder=order)
 
-def clean_dataset(
-    df: pd.DataFrame,
-    threshold_min: int = 350,
-    threshold_max: int = 1500,
-    max_diff: float = 200,
-) -> pd.DataFrame:
-    """
-    Function that cleans the HRV data by removing outliers and adjacent points
-    with too much variation in between. The removed points are replaced by
-    interpolating the data.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame with the data RRI data as the only column and the time of the
-        data as the index.
-    threshold_min : int, optional
-        Minimum accepted value for an RRI interval. Points below this are
-        discarded. Due to physical limitations, it's usually between 200-300ms.
-        Default: 350.
-    threshold_max : int, optional
-        Maximum accepted value for an RRI interval. Points above this are
-        removed. Due to physical limitations, it's usually between 1500-2000ms.
-        Default: 1500.
-    max_diff : float, optional
-        Maximum accepted difference between adjacent RRI intervals. Points that
-        have a difference over this when compared to the previous one are
-        discarded. Due to physical limitations, it's usually between 200-400ms,
-        or 10%-20% variation. If int, it is assumed as a difference in ms, if
-        float between 0 and 1, it is assumed as a difference in percentages.
-        Default: 200.
-
-    Returns
-    -------
-    new_series : pd.DataFrame
-        Clean data.
-    """
-    RRI = df.values.T[0]
-    percentage = max_diff < 1
-    for ii in range(len(RRI)-1):
-        diff = RRI[ii-1]-RRI[ii]
-
-        if(percentage):
-            diff = diff / min(RRI[ii], RRI[ii-1])
-
-        if(diff > max_diff):
-            # Ventricular premature contraction (VPC)
-            if RRI[ii+1] > RRI[ii-1]:
-                RRI[ii] = (RRI[ii]+RRI[ii+1])/2
-                RRI[ii+1] = RRI[ii]
-            # Supraventricular premature contraction (SVPC)
-            else:
-                RRI[ii] = (RRI[ii]+RRI[ii+1])/2
-
-        diff = RRI[ii]-RRI[ii-1]
-        if(percentage):
-            diff = diff / min(RRI[ii], RRI[ii-1])
-
-        if(diff > max_diff):
-            # The omission of detecting R-R wave
-            RRI[ii] = (RRI[ii-1] + RRI[ii+1]) / 2
-        
-        if(RRI[ii] < threshold_min):
-            RRI[ii] = (RRI[ii-1] + RRI[ii+1]) / 2
-        
-        if(RRI[ii] > threshold_max):
-            RRI[ii] = (RRI[ii-1] + RRI[ii+1]) / 2
-    
-    df[df.columns[0]] = RRI.reshape(df.values.shape)
-
-    return df.iloc[:, :]
-
-
-def resample_hrv(
-    signal: pd.DataFrame,
-    fs: int,
-    timestamps : np.array = None
-) -> pd.DataFrame:
-    """
-    Function that resamples the dataset so that all points are evaluated with
-    a fixed sampling rate.
-
-    Parameters
-    ----------
-    signal : pd.DataFrame
-        DataFrame with the data RRI data as the only column and the time of the
-        data as the index.
-    fs : int
-        Sampling rate in Hz that the series will be interpolated by
-    timestamps : np.array
-        Array with the time stamps
-
-    Returns
-    -------
-    new_series : pd.DataFrame
-        Interpolated data.
-    """
-    start = signal.index[0]
-
-    if (timestamps is None):
-        timestamps = np.cumsum(signal.values, dtype=int)
-
-    timestamps = np.insert(timestamps, 0, 0)
-    RRI = np.insert(signal.values, 0, signal.values[0])
-    new_time = np.arange(0, timestamps[-1], 1000/fs)
-    f = interpolate.interp1d(timestamps, RRI)
-    RRI_resampled = np.array(f(new_time), dtype=np.float32)
-
-    t = [start + pd.Timedelta(x/fs, 's') for x in new_time]
-
-    return pd.DataFrame(RRI_resampled, index=t)
+    return signal - trend
 
 
 def read_file(
-    filename: str,
+    filename,
     s: int = 51,
     order: int = 4,
-    low_rri: int = 300,
+    low_rri: int = 333,
     high_rri: int = 1600,
-    diff_rri: int = 0.2,
+    diff_rri: float = 200.0,
     detrending: bool = False,
-    resampling_rate: int = 4,
-    clean_data: bool = True
-) -> np.array:
-    """Function that read HRV data from file cleans it if so required.
-
-    Parameters
-    ----------
-    filename : str or list
-        Name of the csv file containing the HRV data or list with the data
-    s : int, opt
-        Length of the splits for detrending. Default: 41
-    order : int, optional
-        Order of the polynomial to be fit. Default: 4
-    low_rri : int, optional
-        Minimum value allowed for RRI that is used in the preprocessing.
-        Default: 300
-    high_rri : int, optional
-        Maximum value allowed for RRI that is used in the preprocessing.
-        Default: 1600
-    diff_rri : int, optional
-        Maximum difference between successive RRI that is used in the
-        preprocessing. Default: 250
-    detrending : bool, optional
-        Determine whether detrending is applied or not. Default: False
-    resampling_rate : int, optional
-        Determines the sampling rate in Hz to use to interpolate the signal.
-        If None, the signal is not interpolated. Default: None
-    clean_data : bool, optional
-        Whether or not to pre-process the dataset. Default: True
-    repetitions : int, optional
-        Number of times the cleaning process will be repeated.
-    Returns
-    -------
-    out : np.array
-        Numpy array with the time series.
-    """
-    if (isinstance(filename, str)):
-        df = pd.read_csv(filename, header=None)
-    else:
-        df = pd.DataFrame(filename)
-
-    df[0] = pd.to_numeric(df[0], 'coerce').interpolate()
-    timestamps = np.cumsum(df[0])
-
-    df['Time'] = pd.to_datetime(df[0].cumsum(), unit='ms', errors='coerce')
-    df = df.set_index('Time')
-
-    if (clean_data):
-        df = clean_dataset(
-            df,
-            threshold_min=low_rri,
-            threshold_max=high_rri,
-            max_diff=diff_rri
-            )
-
-    if (resampling_rate is not None):
-        df = resample_hrv(df, resampling_rate, timestamps)
-
-    out = df.to_numpy().flatten()
-    out = np.nan_to_num(out, nan=np.mean(out))
-
-    if (detrending and (len(out) > 2*s)):
-        out = detrending(
-                    out,
-                    s,
-                    order
-                )
-    return out.astype(np.double)
-
-
-def read_file_hourly(
-    filename: str,
-    initial_time: str,
-    low_rri: int = 350,
-    high_rri: int = 1500,
-    diff_rri: int = 0.2,
-    resampling_rate: int = 4,
+    resampling_rate: int = 2,
     clean_data: bool = True,
-    offset: int = None,
-    freq: str = '1h',
-    overlap: float = 1
-) -> dict:
-    """Function that read HRV data from file, splits it
-     into hourly segments and cleans it if so required.
+    return_timestamps: bool = False,
+    start_hour: float = 0.0
+):
+    """
+    Reads HRV data, cleans it using Cython optimized functions,
+    optionally resamples, and optionally detrends.
 
     Parameters
     ----------
-    filename : str or list
-        Name of the csv file containing the HRV data or list with the data
-    initial_time : str
-        Time to use as the origin of the recording
+    filename : str or list/array
+        Path to the .rri csv file (Header line 1: StartTime, Line 2+: Data)
+        OR a list/array of RRI values.
+    s : int, optional
+        Window size for detrending filter. Default: 51
+    order : int, optional
+        Polynomial order for detrending. Default: 4
     low_rri : int, optional
-        Minimum value allowed for RRI that is used in the preprocessing.
-        Default: 300
+        Minimum acceptable RRI (ms). Default: 300
     high_rri : int, optional
-        Maximum value allowed for RRI that is used in the preprocessing.
-        Default: 1600
-    diff_rri : int, optional
-        Maximum difference between successive RRI that is used in the
-        preprocessing. Default: 250
+        Maximum acceptable RRI (ms). Default: 1600
+    diff_rri : float, optional
+        Maximum absolute difference allowed between successive RRIs (ms).
+        Default: 200.0
+    detrending : bool, optional
+        If True, applies polynomial detrending. Default: False
     resampling_rate : int, optional
-        Determines the sampling rate in Hz to use to interpolate the signal.
-        If None, the signal is not interpolated. Default: None
+        Sampling rate in Hz. If None, signal is not resampled
+        (returns beat-to-beat).
+        Default: 4
     clean_data : bool, optional
-        Whether or not to pre-process the dataset. Default: True
-    offset : int, optional
-        Amount in minutes to offset the initial position. Default: None.
-    freq : str, optional
-        String with the duration of each recording. Default: '1h'
-    overlap : float, optional
-        Float between 0 and 1 with the percentage of overlap. Default: 1
+        If True, applies artifact correction and duplicate splitting.
+        Default: True
+    return_timestamps : bool, optional
+        If True, returns (rri, timestamps). Default: False
+
     Returns
     -------
-    out : np.array
-        Numpy array with the time series.
+    np.array or tuple
+        The processed RRI signal, or (RRI, Time) if return_timestamps is True.
     """
-    if (isinstance(filename, str)):
+    rri_raw = None
+
+    if isinstance(filename, str):
         df = pd.read_csv(filename, header=None)
+        rri_raw = pd.to_numeric(
+            df[0], 'coerce'
+            ).interpolate().values.flatten().astype(np.float64)
     else:
-        df = pd.DataFrame(filename)
+        if isinstance(filename, pd.DataFrame):
+            rri_raw = filename.values.flatten().astype(np.float64)
+        else:
+            rri_raw = np.array(filename, dtype=np.float64)
 
-    df[0] = pd.to_numeric(df[0], 'coerce').interpolate()
+    if rri_raw is None or len(rri_raw) < 2:
+        raise ValueError("Input data is empty or too short.")
 
-    df['Time'] = pd.to_datetime(
-        df[0].cumsum(),
-        unit='ms',
-        errors='coerce',
-        origin=initial_time
-    )
+    time_rri = start_hour + np.cumsum(rri_raw) / 3_600_000.0
 
-    df = df.set_index('Time')
+    if clean_data:
+        cleaned = rri_utils.clean_rri_signal(
+            rri_raw,
+            time_rri,
+            n_med=9,
+            rri_max=float(high_rri),
+            rri_min=float(low_rri),
+            rri_diff=float(diff_rri)
+        )
+        rri_current = cleaned['rri']
+        time_current = cleaned['time']
+    else:
+        rri_current = rri_raw
+        time_current = time_rri
 
-    if (offset is not None):
-        df.index = df.index + pd.to_timedelta(offset, unit='min')
+    if resampling_rate is not None:
+        t_sec = 1.0 / resampling_rate
 
-    results = {}
+        resampled = rri_utils.resample_signal(
+            time_current,
+            rri_current,
+            t_sec=t_sec
+        )
+        rri_current = resampled['rri']
+        time_current = resampled['time']
 
-    sep = re.split(r'(\d+)', freq)
-    overlap = 1 - overlap
-    dt = pd.to_timedelta(int(sep[1]), unit=sep[2])*overlap
-    window = pd.to_timedelta(int(sep[1]), unit=sep[2])
+    if detrending:
+        rri_current = detrend_signal(rri_current, s=s, order=order)
 
-    if (clean_data):
-        df = clean_dataset(
-            df,
-            threshold_min=low_rri,
-            threshold_max=high_rri,
-            max_diff=diff_rri
-            )
+    if return_timestamps:
+        return rri_current, time_current
 
-    if (resampling_rate is not None):
-        df = resample_hrv(df, resampling_rate)
-
-    step = df.index[0]-(df.index[0].minute*pd.to_timedelta(1, unit='min'))
-    hour = step.hour
-
-    while (df.index[0] >= step):
-        start = np.argmax(df.index >= step)
-        end = np.argmax(df.index[start:] >= step+window)+start
-
-        out = df.iloc[start:end, :]
-
-        if (len(out)):
-            out = out.to_numpy().flatten()
-            out = np.nan_to_num(out, nan=np.mean(out))
-
-            if (hour not in results):
-                results[hour] = out.astype(np.double)
-
-        hour += overlap*int(sep[1])
-        step += dt
-        df = df.iloc[np.argmax(df.index >= step):, :]
-
-    return results
+    return rri_current
 
 
 def time_split(signal: np.array, freq: str) -> list:
@@ -367,3 +192,121 @@ def time_split(signal: np.array, freq: str) -> list:
     return [
         i.to_numpy().flatten() for _, i in split
     ]
+
+
+def read_file_hourly(
+    filename,
+    initial_time: str,
+    low_rri: int = 350,
+    high_rri: int = 1500,
+    diff_rri: float = 200.0,
+    resampling_rate: int = 4,
+    clean_data: bool = True,
+    offset: int = None,
+    freq: str = '1h',
+    overlap: float = 0.0
+) -> dict:
+    """
+    Reads HRV data, cleans/resamples it globally using Cython,
+    and splits it into hourly (or custom freq) segments.
+
+    Parameters
+    ----------
+    filename : str or list
+        Path to csv or list of data.
+    initial_time : str
+        Start time "HH:MM:SS".
+    low_rri, high_rri, diff_rri : int/float
+        Cleaning parameters.
+    resampling_rate : int
+        Sampling rate in Hz.
+    clean_data : bool
+        Apply cleaning pipeline.
+    offset : int
+        Offset in MINUTES to skip from start.
+    freq : str
+        Window size ('1h', '30min').
+    overlap : float
+        Overlap fraction (0.0 to <1.0).
+        Note: Original code had overlap=1 implying 0 step,
+        assumed 0.0 default here for safety.
+
+    Returns
+    -------
+    dict
+        Keys: Hour index (float), Values: Numpy array of RRI segment.
+    """
+
+    start_hour = parse_time_string(initial_time)
+
+    if offset is not None:
+        start_hour += offset / 60.0
+
+    if isinstance(filename, str):
+        df = pd.read_csv(filename, header=None)
+        rri_raw = pd.to_numeric(
+            df[0], 'coerce'
+            ).interpolate().values.flatten().astype(np.float64)
+    else:
+        if isinstance(filename, pd.DataFrame):
+            rri_raw = filename.values.flatten().astype(np.float64)
+        else:
+            rri_raw = np.array(filename, dtype=np.float64)
+
+    time_rri = np.cumsum(rri_raw) / 3_600_000.0
+    time_rri = start_hour + np.concatenate(([start_hour], time_rri[:-1]))
+
+    if clean_data:
+        cleaned = rri_utils.clean_rri_signal(
+            rri_raw,
+            time_rri,
+            rri_min=float(low_rri),
+            rri_max=float(high_rri),
+            rri_diff=float(diff_rri)
+        )
+        curr_rri = cleaned['rri']
+        curr_time = cleaned['time']
+    else:
+        curr_rri = rri_raw
+        curr_time = time_rri
+
+    if resampling_rate is not None:
+        t_sec = 1.0 / resampling_rate
+        resampled = rri_utils.resample_signal(curr_time, curr_rri, t_sec=t_sec)
+        curr_rri = resampled['rri']
+        curr_time = resampled['time']
+
+    results = {}
+
+    window_size_hr = parse_freq_to_hours(freq)
+
+    step_size_hr = window_size_hr * (1.0 - overlap)
+
+    if step_size_hr <= 0:
+        raise ValueError("Overlap resulted in zero or negative step size.")
+
+    current_window_start = np.floor(start_hour)
+
+    while current_window_start + window_size_hr < curr_time[0]:
+        current_window_start += step_size_hr
+
+    max_time = curr_time[-1]
+
+    while current_window_start < max_time:
+        current_window_end = current_window_start + window_size_hr
+        idx_start = np.searchsorted(
+            curr_time, current_window_start, side='left'
+            )
+        idx_end = np.searchsorted(curr_time, current_window_end, side='left')
+        segment = curr_rri[idx_start:idx_end]
+
+        if len(segment) > 0:
+            if np.isnan(segment).any():
+                mean_val = np.nanmean(segment)
+                segment = np.nan_to_num(segment, nan=mean_val)
+
+            results[current_window_start] = segment.astype(np.float64)
+
+        current_window_start += step_size_hr
+
+    return results
