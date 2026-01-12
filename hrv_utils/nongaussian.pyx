@@ -5,8 +5,10 @@
 # cython: cdivision=True
 
 import numpy as np
-cimport numpy as np
-from libc.math cimport log, fabs, pow, M_PI, lgamma, isnan, sqrt, isinf
+cimport numpy as cnp
+from libc.stdlib cimport rand, RAND_MAX, srand
+from libc.math cimport log, fabs, pow, M_PI, lgamma, isnan, sqrt, isinf, exp, cos, sin
+from libc.time cimport time
 from scipy.linalg import pinv
 
 cdef double EULER_MASCHERONI = 0.57721566490153286060
@@ -262,3 +264,57 @@ cdef double _calc_case_general(double[:] x, double q) nogil:
     cdef double term = LOG_PI_DIV_2 + log(m_absq) + c1 + c2
     
     return pre_factor * term
+
+
+def generate_cascade_series(double lambda2_total, int n_level, int n_base):
+    cdef double lambda2_per_level = lambda2_total / n_level
+    cdef double sigma_logw = sqrt(lambda2_per_level)
+    cdef double mu = -lambda2_per_level / 2.0
+    cdef double two_pi = 2.0 * M_PI
+    srand(time(NULL))
+    cdef cnp.ndarray[cnp.double_t, ndim=1] weights = np.ones(n_base, dtype=np.float64)
+    cdef cnp.ndarray[cnp.double_t, ndim=1] new_weights
+
+    cdef double[:] w_view
+    cdef double[:] new_w_view
+
+    cdef int lev, i, n_parent, idx_l, idx_r
+    cdef double u1, u2, z1, z2, mag, w_val
+
+    for lev in range(n_level):
+        n_parent = weights.shape[0]
+        new_weights = np.empty(n_parent * 2, dtype=np.float64)
+        w_view = weights
+        new_w_view = new_weights
+
+        for i in range(n_parent):
+            u1 = (rand() + 1.0) / (RAND_MAX + 2.0)
+            u2 = (rand() + 1.0) / (RAND_MAX + 2.0)
+
+            mag = sqrt(-2.0 * log(u1))
+            z1 = mag * cos(two_pi * u2)
+            z2 = mag * sin(two_pi * u2)
+
+            w_val = w_view[i]
+            new_w_view[2 * i] = w_val * exp(mu + (sigma_logw * z1))
+            new_w_view[2 * i + 1] = w_val * exp(mu + (sigma_logw * z2))
+
+        weights = new_weights
+
+    cdef int n_final = weights.shape[0]
+    w_view = weights
+    
+    for i in range(0, n_final, 2):
+        u1 = (rand() + 1.0) / (RAND_MAX + 2.0)
+        u2 = (rand() + 1.0) / (RAND_MAX + 2.0)
+        
+        mag = sqrt(-2.0 * log(u1))
+        z1 = mag * cos(two_pi * u2)
+        z2 = mag * sin(two_pi * u2)
+        
+        w_view[i] *= z1
+
+        if i + 1 < n_final:
+            w_view[i + 1] *= z2
+            
+    return weights

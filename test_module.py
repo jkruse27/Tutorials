@@ -9,6 +9,7 @@ sys.path.append(os.getcwd())
 try:
     from hrv_utils import rri_utils
     from hrv_utils import nongaussian
+    from hrv_utils import dma
 except ImportError:
     print("❌ Could not import 'hrv_utils'.")
     sys.exit(1)
@@ -254,10 +255,76 @@ def run_lambda_comparison(orig_dir, gt_csv_path, scale_sec=25, t_sec=0.5):
         print(f"{filename:<30} | {status_icon:<10} | {details}")
 
 
+def test_dma_vs_c_output(ORIG_DIR, DMA_DIR, order):
+    out_files = glob.glob(os.path.join(DMA0_DIR, "*.csv"))
+
+    for c_output_file in out_files:
+        df = pd.read_csv(c_output_file, header=None)
+
+        c_log_scales = df.iloc[:, 2].values
+        scales = np.round(10**c_log_scales).astype(np.int_)
+
+        target_log_rmse = df.iloc[:, 1].values
+        input_data_file = f"{ORIG_DIR}/{c_output_file.split('/')[-1]}"
+
+        data = np.loadtxt(input_data_file)
+        python_rmse = dma.dma(data, scales, order=order, integrate=1)
+        python_log_rmse = np.log10(python_rmse)
+        diff = np.abs(python_log_rmse - target_log_rmse)
+        mean_err = np.mean(diff)
+        max_err = np.max(diff)
+
+        is_passed = (mean_err < 0.001) and (max_err < 0.001)
+        status_icon = "✅ PASSED" if is_passed else "❌ FAILED"
+
+        details = ""
+        if abs(len(python_log_rmse) - len(target_log_rmse)) > 1:
+            l1 = len(python_log_rmse)
+            l2 = len(target_log_rmse)
+            details = f"(Len mismatch: {l1} vs {l2})"
+        elif not is_passed:
+            details = f"(Mean: {mean_err:.2f}, Max: {max_err:.2f})"
+
+        print(f"{c_output_file:<30} | {status_icon:<10} | {details}")
+
+
+def test_synthetic_lambdas(target_lambdas):
+    print(f"{'TARGET Λ':<30} | {'STATUS':<10} | {'DETAILS':<35}")
+    print("-" * 80)
+
+    K = 50
+    for gt_lambda in target_lambdas:
+        my_lambda = 0
+        for i in range(K):
+            signal = nongaussian.generate_cascade_series(
+                gt_lambda,
+                14,
+                1
+            )
+            signal_norm = (signal - np.mean(signal)) / np.std(signal)
+            lambdas_sq = nongaussian.nongaussian_index(signal_norm, 0.5)
+
+            my_lambda += np.abs(lambdas_sq)
+
+        my_lambda /= K
+        diff = abs(my_lambda - gt_lambda)
+        is_passed = diff < 0.05
+
+        status_icon = "✅ PASSED" if is_passed else "❌ FAILED"
+
+        name_display = f"Synth_Lambda_{gt_lambda:.3f}"
+        details = f"Got: {my_lambda:.4f} | GT: {gt_lambda:.4f} | Δ: {diff:.4f}"
+
+        print(f"{name_display:<30} | {status_icon:<10} | {details}")
+
+
 if __name__ == "__main__":
     ORIG_DIR = "test/orig"
     PROC_DIR = "test/processed"
     SG_DIR = "test/savgol"
+    DMA0_DIR = "test/DMA0"
+    DMA2_DIR = "test/DMA2"
+    DMA4_DIR = "test/DMA4"
 
     print("CLEANING DATA COMPARISON")
     run_comparison(ORIG_DIR, PROC_DIR)
@@ -271,3 +338,23 @@ if __name__ == "__main__":
     print()
     print("NON-GAUSSIAN INDEX COMPARISON")
     run_lambda_comparison(ORIG_DIR, "test/lambda_results.csv")
+    print()
+    print("------------------------------------------------------------")
+    print()
+    print("NON-GAUSSIAN GENERATION EVALUATION")
+    test_synthetic_lambdas(np.arange(0, 1, 0.1, dtype=np.float64))
+    print()
+    print("------------------------------------------------------------")
+    print()
+    print("DMA 0th order")
+    test_dma_vs_c_output(ORIG_DIR, DMA0_DIR, 0)
+    print()
+    print("------------------------------------------------------------")
+    print()
+    print("DMA 2nd order")
+    test_dma_vs_c_output(ORIG_DIR, DMA2_DIR, 2)
+    print()
+    print("------------------------------------------------------------")
+    print()
+    print("DMA 4th order")
+    test_dma_vs_c_output(ORIG_DIR, DMA4_DIR, 4)

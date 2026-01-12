@@ -1,43 +1,24 @@
 import cython
 import numpy as np
 cimport numpy as cnp
-from cython.parallel import prange
+from libc.math cimport sqrt, pow
 
 def create_scales(
         min_box,
         max_box,
         ratio = np.exp2(0.125)
-    ) -> np.array:
-    """Function that creates a list of scales in the
-    specified range.
-
-    Parameters
-    ----------
-    min_box: int
-        Minimum scale size.
-    max_box: int
-        Maximum scale size.
-    ratio: int, optional
-        Ratio between scales. Default: 2^(1/8)
-
-    Returns
-    -------
-        np.array
-            Numpy array with the calculated scales.
-    """
-    # Define maximum value based on the parameters
+    ) -> np.ndarray:
+    """Function that creates a list of scales in the specified range."""
     rslen = int(np.log10(max_box / min_box) / np.log10(ratio)) + 1
-    # Generate list of scales by multiplying the initial value by successive
-    # exponents of the ratio
+    
     rs = np.empty((rslen,))
     rs[0] = min_box
     rs[1:] = ratio
     rs = np.cumprod(rs) + 0.5
 
-    # Select only the values in the defined range
     rs = rs[rs < max_box]
 
-    return np.unique((rs//2)*2+1).astype(np.int32)
+    return np.unique((rs//2)*2+1).astype(np.int_)
 
 
 def dma(
@@ -53,9 +34,9 @@ def dma(
             compute_dma(series, scales, order, integrate)
             ))
     else:
-        return np.sqrt(np.asarray(
-            compute_dma_q(series, scales, order, integrate, q)
-            ))
+        return np.asarray(
+             compute_dma_q(series, scales, order, integrate, q)
+            )
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
@@ -66,31 +47,13 @@ cdef double[:] compute_dma(
     int order,
     int integrate = 1
     ):
-    """Function that calculates the detrended moving average of a series
-    and returns the array of values for each scale.
-
-    Parameters
-    ----------
-    series: cnp.ndarray
-        Time series that is being analyzed as a numpy array of doubles.
-    scales: cnp.ndarray
-        The scales that the series will be analyzed at as a numpy array of longss
-    order: int
-        Order of the detrending polynomial.
-    integrate: int, optional
-        Whether to integrate the series or not before applying DMA. Default: 1 (True)
-
-    Returns
-    -------
-        int
-    """
     cdef long n, i, n_scales, i_refresh
-    cdef int start
     cdef double[:] f2
     cdef double[:,:] local_sum
 
     if(integrate):
-        series = np.cumsum(series-np.mean(series))
+        series = np.cumsum(series - np.mean(series))
+    
     n = series.shape[0]
     n_scales = scales.shape[0]
 
@@ -99,17 +62,19 @@ cdef double[:] compute_dma(
     elif(order == 2):
         i_refresh = 5000
     else:
-        i_refresh =  100
+        i_refresh = 100
+    
     if(i_refresh > n): i_refresh = n
 
-    local_sum = np.empty((5, <long>(n/i_refresh)+1))
+    # Initialize with zeros to prevent NaN from garbage memory
+    local_sum = np.zeros((5, <long>(n/i_refresh)+2), dtype=np.float64)
     f2 = np.empty(n_scales)
 
     with nogil:
         for i in range(0, n_scales):
             f2[i] = estimate_f2(series, scales, i, order, i_refresh, local_sum)
 
-    return np.asarray(f2)
+    return f2
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
@@ -121,33 +86,13 @@ cdef double[:] compute_dma_q(
     int integrate = 1,
     float q = 2
     ):
-    """Function that calculates the detrended moving average of a series
-    and returns the array of values for each scale.
-
-    Parameters
-    ----------
-    series: cnp.ndarray
-        Time series that is being analyzed as a numpy array of doubles.
-    scales: cnp.ndarray
-        The scales that the series will be analyzed at as a numpy array of longss
-    order: int
-        Order of the detrending polynomial.
-    integrate: int, optional
-        Whether to integrate the series or not before applying DMA. Default: 1 (True)
-    q: float, optional
-        Order of the generalized variance estimation. Default: 2.
-
-    Returns
-    -------
-        int
-    """
     cdef long n, i, n_scales, i_refresh
-    cdef int start
     cdef double[:] f2
     cdef double[:,:] local_sum
 
     if(integrate):
-        series = np.cumsum(series-np.mean(series))
+        series = np.cumsum(series - np.mean(series))
+    
     n = series.shape[0]
     n_scales = scales.shape[0]
 
@@ -156,39 +101,41 @@ cdef double[:] compute_dma_q(
     elif(order == 2):
         i_refresh = 5000
     else:
-        i_refresh =  100
+        i_refresh = 100
+    
     if(i_refresh > n): i_refresh = n
 
-    local_sum = np.empty((5, <long>(n/i_refresh)+1))
+    local_sum = np.zeros((5, <long>(n/i_refresh)+2), dtype=np.float64)
     f2 = np.empty(n_scales)
 
     with nogil:
         for i in range(0, n_scales):
             f2[i] = estimate_f2_q(series, scales, i, order, i_refresh, local_sum, q)
 
-    return np.asarray(f2)
+    return f2
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
-cdef int cmat(float k, int order, double* c) nogil:
+cdef int cmat(double k, int order, double* c) nogil:
     cdef double den, k2, k3, k4, k5
     k2 = k*k
-    k3 = k2*k
-    k4 = k3*k
-    k5 = k4*k
-
+    
     if(order == 0):
-        c[0] = 1/(2*k+1)
+        c[0] = 1.0/(2.0*k+1.0)
     elif(order == 2):
-        den = 8*k3+12*k2-2*k-3
-        c[0] = (9*k2+9*k-3)/den
-        c[1] = -15/den
+        k3 = k2*k
+        den = 8.0*k3 + 12.0*k2 - 2.0*k - 3.0
+        c[0] = (9.0*k2 + 9.0*k - 3.0)/den
+        c[1] = -15.0/den
     elif(order == 4):
-        den = 180+72*k-800*k2-320*k3+320*k4+128*k5
-        c[0] = (180-750*k-525*k2+450*k3+225*k4)/den
-        c[1] = (1575-1050*k-1050*k2)/den
-        c[2] = 945/den
+        k3 = k2*k
+        k4 = k3*k
+        k5 = k4*k
+        den = 180.0 + 72.0*k - 800.0*k2 - 320.0*k3 + 320.0*k4 + 128.0*k5
+        c[0] = (180.0 - 750.0*k - 525.0*k2 + 450.0*k3 + 225.0*k4)/den
+        c[1] = (1575.0 - 1050.0*k - 1050.0*k2)/den
+        c[2] = 945.0/den
     else:
         return -1
 
@@ -210,34 +157,36 @@ cdef double estimate_f2(
     cdef double f2, a0, y00, y0i, y10, y1i, y0ii, y1ii, y0iii, y0iv
     cdef double temp, temp1, temp2, nn1, nn2, nn3, nn4, y1iii, y1iv
     cdef long scale = (scales[index])
+    
     n = series.shape[0]
     f2 = 0
     k = <long> ((scale-1)/2)
-    ic = k + 1
+    ic = k 
 
     if(order == 0):
         y10=0
-
         for i in range(0, scale):
-            y10 += series[i]
+             y10 += series[i]
 
         cmat(<double> k, order, c)
         a0 = c[0]*y10
         temp = (series[ic] - a0)
         f2 = temp*temp
-        itemp = n-scale
+        itemp = n - scale
 
         for i in range(0, itemp):
             if((i+1) % i_refresh == 0):
                 y10=0
+                # DMA0 specific refresh logic
                 for j in range(1, scale+1):
                     if(i+j < n):
                         y10 += series[i+j]
             else:
-                y10 += series[i+scale]-series[i]
+                y10 += series[i+scale] - series[i]
 
             a0 = c[0]*y10
-            temp = (series[i+ic] - a0)
+            # FIX: Restored +1. The window is shifted by i+1, so center is ic+i+1.
+            temp = (series[i + ic + 1] - a0)
             f2 += temp*temp
 
         f2 = f2/<double>(n)
@@ -248,24 +197,23 @@ cdef double estimate_f2(
             kb = <long> ((scales[index-1]-1)/2)
         else:
             kb = 1
+            
         nn1 = <double>(kb-k)
         nn2 = nn1*nn1
 
         if(index == 0):
             i0 = 0
-            y10 = 0
-            y1i = 0
-            y1ii = 0
+            y10 = 0; y1i = 0; y1ii = 0
         else:
             i0 = <long> (scales[index-1])
             y10 = local_sums[0][iloc]
-            y1i = local_sums[1][iloc]+local_sums[0][iloc]*nn1
-            y1ii = local_sums[2][iloc]+2*local_sums[1][iloc]*nn1+local_sums[0][iloc]*nn2
+            y1i = local_sums[1][iloc] + local_sums[0][iloc]*nn1
+            y1ii = local_sums[2][iloc] + 2*local_sums[1][iloc]*nn1 + local_sums[0][iloc]*nn2
 
         for i in range(i0, scale):
             y10 += series[i]
             temp1 = series[i]*<double>(i-k)
-            y1i += temp1;
+            y1i += temp1
             temp2 = temp1*<double>(i-k)
             y1ii += temp2
 
@@ -274,31 +222,30 @@ cdef double estimate_f2(
         local_sums[2][iloc] = y1ii
 
         cmat(<double>k, order, c)
-        a0 = c[0]*y10+c[1]*y1ii
+        a0 = c[0]*y10 + c[1]*y1ii
         temp1 = (series[ic] - a0)
         f2 += temp1*temp1
-        itemp = n-scale
+        itemp = n - scale
 
         for i in range(0, itemp):
             if((i+1) % i_refresh == 0):
                 iloc += 1
                 if(index == 0):
-                    i0 = 1
-                    y10 = 0
-                    y1i = 0
-                    y1ii = 0
+                    i0 = 0
+                    y10 = 0; y1i = 0; y1ii = 0
                 else:
-                    i0 = scales[index-1]+1
+                    i0 = scales[index-1]
                     y10 = local_sums[0][iloc]
-                    y1i = local_sums[1][iloc]+local_sums[0][iloc]*nn1
-                    y1ii = local_sums[2][iloc]+2*local_sums[1][iloc]*nn1+local_sums[0][iloc]*nn2
-                
-                for j in range(i0, scale+1):
-                    if(i + j < n):
-                        y10 += series[i+j]
-                        temp1 = series[i+j]*<double>(j-k-1)
+                    y1i = local_sums[1][iloc] + local_sums[0][iloc]*nn1
+                    y1ii = local_sums[2][iloc] + 2*local_sums[1][iloc]*nn1 + local_sums[0][iloc]*nn2
+
+                for j in range(i0, scale):
+                    # FIX: series[i+1+j] ensures we sum the window for step i+1
+                    if(i + 1 + j < n):
+                        y10 += series[i+1+j]
+                        temp1 = series[i+1+j]*<double>(j-k)
                         y1i += temp1
-                        temp2 = temp1*<double>(j-k-1)
+                        temp2 = temp1*<double>(j-k)
                         y1ii += temp2
 
                 local_sums[0][iloc] = y10
@@ -309,14 +256,20 @@ cdef double estimate_f2(
                 y0i = y1i
                 y0ii = y1ii
 
-                y10 = y00 + series[i+scale]-series[i]
+                y10 = y00 + series[i+scale] - series[i]
+                
                 temp1 = series[i]*<double>(k+1)
                 temp2 = series[i+scale]*<double>k
+                
                 y1i = y0i - y00 + temp1 + temp2
-                y1ii = y0ii - 2*y0i + y00 - temp1 *<double>(k+1) + temp2*<double>k
+                
+                temp1 = temp1*<double>(k+1)
+                temp2 = temp2*<double>k
+                y1ii = y0ii - 2*y0i + y00 - temp1 + temp2
 
-            a0 = c[0]*y10+c[1]*y1ii
-            temp1 = (series[i+ic] - a0)
+            a0 = c[0]*y10 + c[1]*y1ii
+            # FIX: Restored +1 for correct alignment
+            temp1 = (series[i + ic + 1] - a0)
             f2 += temp1*temp1
 
         f2 = f2/<double>(n)
@@ -327,6 +280,7 @@ cdef double estimate_f2(
             kb = <long> ((scales[index-1]-1)/2)
         else:
             kb = 1
+            
         nn1 = <double>(kb-k)
         nn2 = nn1*nn1
         nn3 = nn2*nn1
@@ -334,19 +288,15 @@ cdef double estimate_f2(
         
         if(index == 0):
             i0 = 0
-            y10 = 0
-            y1i = 0
-            y1ii = 0
-            y1iii = 0
-            y1iv = 0
+            y10 = 0; y1i = 0; y1ii = 0; y1iii = 0; y1iv = 0
         else:
             i0 = scales[index-1]
             y10 = local_sums[0][iloc]
-            y1i = local_sums[1][iloc] + local_sums[0][iloc]*nn1;
-            y1ii = local_sums[2][iloc]+2*local_sums[1][iloc]*nn1+local_sums[0][iloc]*nn2;
-            y1iii = local_sums[3][iloc]+3*local_sums[2][iloc]*nn1+3*local_sums[1][iloc]*nn2+local_sums[0][iloc]*nn3;
-            y1iv = local_sums[4][iloc]+4*local_sums[3][iloc]*nn1+6*local_sums[2][iloc]*nn2+4*local_sums[1][iloc]*nn3+local_sums[0][iloc]*nn4;
-
+            y1i = local_sums[1][iloc] + local_sums[0][iloc]*nn1
+            y1ii = local_sums[2][iloc] + 2*local_sums[1][iloc]*nn1 + local_sums[0][iloc]*nn2
+            y1iii = local_sums[3][iloc] + 3*local_sums[2][iloc]*nn1 + 3*local_sums[1][iloc]*nn2 + local_sums[0][iloc]*nn3
+            y1iv = local_sums[4][iloc] + 4*local_sums[3][iloc]*nn1 + 6*local_sums[2][iloc]*nn2 + 4*local_sums[1][iloc]*nn3 + local_sums[0][iloc]*nn4
+            
         for i in range(i0, scale):
             y10 += series[i]
             temp1 = series[i]*<double>(i-k)
@@ -364,43 +314,39 @@ cdef double estimate_f2(
         local_sums[3][iloc] = y1iii
         local_sums[4][iloc] = y1iv
         
-        
         cmat(<double> k, order, c)
         
-        a0 = c[0]*y10+c[1]*y1ii+c[2]*y1iv
+        a0 = c[0]*y10 + c[1]*y1ii + c[2]*y1iv
         temp1 = (series[ic] - a0)
         f2 = temp1*temp1
 
-        itemp = n-scale
+        itemp = n - scale
 
         for i in range(0, itemp):
             if((i+1) % i_refresh == 0):
                 iloc += 1
                 if(index == 0):
-                    i0 = 1
-                    y10 = 0
-                    y1i = 0
-                    y1ii = 0
-                    y1iii = 0
-                    y1iv = 0
+                    i0 = 0
+                    y10 = 0; y1i = 0; y1ii = 0; y1iii = 0; y1iv = 0
                 else:
-                    i0 = scales[index-1]+1
+                    i0 = scales[index-1]
                     y10 = local_sums[0][iloc]
-                    y1i = local_sums[1][iloc]+local_sums[0][iloc]*nn1
-                    y1ii = local_sums[2][iloc]+2*local_sums[1][iloc]*nn1+local_sums[0][iloc]*nn2
-                    y1iii = local_sums[3][iloc]+3*local_sums[2][iloc]*nn1+3*local_sums[1][iloc]*nn2+local_sums[0][iloc]*nn3
-                    y1iv = local_sums[4][iloc]+4*local_sums[3][iloc]*nn1+6*local_sums[2][iloc]*nn2+4*local_sums[1][iloc]*nn3+local_sums[0][iloc]*nn4
+                    y1i = local_sums[1][iloc] + local_sums[0][iloc]*nn1
+                    y1ii = local_sums[2][iloc] + 2*local_sums[1][iloc]*nn1 + local_sums[0][iloc]*nn2
+                    y1iii = local_sums[3][iloc] + 3*local_sums[2][iloc]*nn1 + 3*local_sums[1][iloc]*nn2 + local_sums[0][iloc]*nn3
+                    y1iv = local_sums[4][iloc] + 4*local_sums[3][iloc]*nn1 + 6*local_sums[2][iloc]*nn2 + 4*local_sums[1][iloc]*nn3 + local_sums[0][iloc]*nn4
                 
-                for j in range(i0, scale+1):
-                    if(i + j < n):
-                        y10 += series[i+j]
-                        temp1 = series[i+j]*<double>(j-k-1)
+                for j in range(i0, scale):
+                    # FIX: series[i+1+j] ensures we sum the window for step i+1
+                    if(i + 1 + j < n):
+                        y10 += series[i+1+j]
+                        temp1 = series[i+1+j]*<double>(j-k)
                         y1i += temp1
-                        temp2 = temp1*<double>(j-k-1)
+                        temp2 = temp1*<double>(j-k)
                         y1ii += temp2
-                        temp1 = temp2*<double>(j-k-1)
+                        temp1 = temp2*<double>(j-k)
                         y1iii += temp1
-                        temp2 = temp1*<double>(j-k-1)
+                        temp2 = temp1*<double>(j-k)
                         y1iv += temp2
 
                 local_sums[0][iloc] = y10
@@ -415,21 +361,26 @@ cdef double estimate_f2(
                 y0iii = y1iii
                 y0iv = y1iv
 
-                y10 = y00 + series[i+scale]-series[i]
+                y10 = y00 + series[i+scale] - series[i]
+                
                 temp1 = series[i]*<double>(k+1)
                 temp2 = series[i+scale]*<double>k
+                
                 y1i = y0i - y00 + temp1 + temp2
+                
                 temp1 = temp1*<double>(k+1)
                 temp2 = temp2*<double>k
                 y1ii = y0ii - 2*y0i + y00 - temp1 + temp2
+                
                 temp1 = temp1*<double>(k+1)
                 temp2 = temp2*<double>k
                 y1iii = y0iii - 3*y0ii + 3*y0i - y00 + temp1 + temp2
+                
                 y1iv = y0iv - 4*y0iii + 6* y0ii - 4 * y0i + y00 - temp1 *<double>(k+1) + temp2*<double>k
             
-            a0 = c[0]*y10+c[1]*y1ii+c[2]*y1iv
-
-            temp1 = (series[i+ic] - a0)
+            a0 = c[0]*y10 + c[1]*y1ii + c[2]*y1iv
+            # FIX: Restored +1 for correct alignment
+            temp1 = (series[i + ic + 1] - a0)
             f2 += temp1*temp1
 
         f2 = f2/<double>(itemp+1)
@@ -456,22 +407,22 @@ cdef double estimate_f2_q(
     cdef double f2, a0, y00, y0i, y10, y1i, y0ii, y1ii, y0iii, y0iv
     cdef double temp, temp1, temp2, nn1, nn2, nn3, nn4, y1iii, y1iv
     cdef long scale = (scales[index])
+    
     n = series.shape[0]
     f2 = 0
     k = <long> ((scale-1)/2)
-    ic = k + 1
+    ic = k
 
     if(order == 0):
         y10=0
-
         for i in range(0, scale):
-            y10 += series[i]
+             y10 += series[i]
 
         cmat(<double> k, order, c)
         a0 = c[0]*y10
         temp = (series[ic] - a0)
-        f2 = (temp*temp)**(q/2)
-        itemp = n-scale
+        f2 = pow(temp*temp, q/2.0)
+        itemp = n - scale
 
         for i in range(0, itemp):
             if((i+1) % i_refresh == 0):
@@ -480,207 +431,13 @@ cdef double estimate_f2_q(
                     if(i+j < n):
                         y10 += series[i+j]
             else:
-                y10 += series[i+scale]-series[i]
+                y10 += series[i+scale] - series[i]
 
             a0 = c[0]*y10
-            temp = (series[i+ic] - a0)
-            f2 += (temp*temp)**(q/2)
+            # FIX: Restored +1 for correct alignment
+            temp = (series[i + ic + 1] - a0)
+            f2 += pow(temp*temp, q/2.0)
 
-        f2 = (f2/<double>(n))**(1/q)
-
-    elif(order == 2):
-        iloc = 0
-        if(index != 0):
-            kb = <long> ((scales[index-1]-1)/2)
-        else:
-            kb = 1
-        nn1 = <double>(kb-k)
-        nn2 = nn1*nn1
-
-        if(index == 0):
-            i0 = 0
-            y10 = 0
-            y1i = 0
-            y1ii = 0
-        else:
-            i0 = <long> (scales[index-1])
-            y10 = local_sums[0][iloc]
-            y1i = local_sums[1][iloc]+local_sums[0][iloc]*nn1
-            y1ii = local_sums[2][iloc]+2*local_sums[1][iloc]*nn1+local_sums[0][iloc]*nn2
-
-        for i in range(i0, scale):
-            y10 += series[i]
-            temp1 = series[i]*<double>(i-k)
-            y1i += temp1;
-            temp2 = temp1*<double>(i-k)
-            y1ii += temp2
-
-        local_sums[0][iloc] = y10
-        local_sums[1][iloc] = y1i
-        local_sums[2][iloc] = y1ii
-
-        cmat(<double>k, order, c)
-        a0 = c[0]*y10+c[1]*y1ii
-        temp1 = (series[ic] - a0)
-        f2 += (temp1*temp1)**(q/2)
-        itemp = n-scale
-
-        for i in range(0, itemp):
-            if((i+1) % i_refresh == 0):
-                iloc += 1
-                if(index == 0):
-                    i0 = 1
-                    y10 = 0
-                    y1i = 0
-                    y1ii = 0
-                else:
-                    i0 = scales[index-1]+1
-                    y10 = local_sums[0][iloc]
-                    y1i = local_sums[1][iloc]+local_sums[0][iloc]*nn1
-                    y1ii = local_sums[2][iloc]+2*local_sums[1][iloc]*nn1+local_sums[0][iloc]*nn2
-                
-                for j in range(i0, scale+1):
-                    if(i + j < n):
-                        y10 += series[i+j]
-                        temp1 = series[i+j]*<double>(j-k-1)
-                        y1i += temp1
-                        temp2 = temp1*<double>(j-k-1)
-                        y1ii += temp2
-
-                local_sums[0][iloc] = y10
-                local_sums[1][iloc] = y1i
-                local_sums[2][iloc] = y1ii
-            else:
-                y00 = y10
-                y0i = y1i
-                y0ii = y1ii
-
-                y10 = y00 + series[i+scale]-series[i]
-                temp1 = series[i]*<double>(k+1)
-                temp2 = series[i+scale]*<double>k
-                y1i = y0i - y00 + temp1 + temp2
-                y1ii = y0ii - 2*y0i + y00 - temp1 *<double>(k+1) + temp2*<double>k
-
-            a0 = c[0]*y10+c[1]*y1ii
-            temp1 = (series[i+ic] - a0)
-            f2 += (temp1*temp1)**(q/2)
-
-        f2 = (f2/<double>(n))**(1/q)
-
-    elif(order == 4):
-        iloc = 0
-        if(index != 0):
-            kb = <long> ((scales[index-1]-1)/2)
-        else:
-            kb = 1
-        nn1 = <double>(kb-k)
-        nn2 = nn1*nn1
-        nn3 = nn2*nn1
-        nn4 = nn2*nn2
-        
-        if(index == 0):
-            i0 = 0
-            y10 = 0
-            y1i = 0
-            y1ii = 0
-            y1iii = 0
-            y1iv = 0
-        else:
-            i0 = scales[index-1]
-            y10 = local_sums[0][iloc]
-            y1i = local_sums[1][iloc] + local_sums[0][iloc]*nn1;
-            y1ii = local_sums[2][iloc]+2*local_sums[1][iloc]*nn1+local_sums[0][iloc]*nn2;
-            y1iii = local_sums[3][iloc]+3*local_sums[2][iloc]*nn1+3*local_sums[1][iloc]*nn2+local_sums[0][iloc]*nn3;
-            y1iv = local_sums[4][iloc]+4*local_sums[3][iloc]*nn1+6*local_sums[2][iloc]*nn2+4*local_sums[1][iloc]*nn3+local_sums[0][iloc]*nn4;
-
-        for i in range(i0, scale):
-            y10 += series[i]
-            temp1 = series[i]*<double>(i-k)
-            y1i += temp1
-            temp2 = temp1*<double>(i-k)
-            y1ii += temp2
-            temp1 = temp2*<double>(i-k)
-            y1iii += temp1
-            temp2 = temp1*<double>(i-k)
-            y1iv += temp2
-        
-        local_sums[0][iloc] = y10
-        local_sums[1][iloc] = y1i
-        local_sums[2][iloc] = y1ii
-        local_sums[3][iloc] = y1iii
-        local_sums[4][iloc] = y1iv
-        
-        
-        cmat(<double> k, order, c)
-        
-        a0 = c[0]*y10+c[1]*y1ii+c[2]*y1iv
-        temp1 = (series[ic] - a0)
-        f2 = (temp1*temp1)**(q/2)
-
-        itemp = n-scale
-
-        for i in range(0, itemp):
-            if((i+1) % i_refresh == 0):
-                iloc += 1
-                if(index == 0):
-                    i0 = 1
-                    y10 = 0
-                    y1i = 0
-                    y1ii = 0
-                    y1iii = 0
-                    y1iv = 0
-                else:
-                    i0 = scales[index-1]+1
-                    y10 = local_sums[0][iloc]
-                    y1i = local_sums[1][iloc]+local_sums[0][iloc]*nn1
-                    y1ii = local_sums[2][iloc]+2*local_sums[1][iloc]*nn1+local_sums[0][iloc]*nn2
-                    y1iii = local_sums[3][iloc]+3*local_sums[2][iloc]*nn1+3*local_sums[1][iloc]*nn2+local_sums[0][iloc]*nn3
-                    y1iv = local_sums[4][iloc]+4*local_sums[3][iloc]*nn1+6*local_sums[2][iloc]*nn2+4*local_sums[1][iloc]*nn3+local_sums[0][iloc]*nn4
-                
-                for j in range(i0, scale+1):
-                    if(i + j < n):
-                        y10 += series[i+j]
-                        temp1 = series[i+j]*<double>(j-k-1)
-                        y1i += temp1
-                        temp2 = temp1*<double>(j-k-1)
-                        y1ii += temp2
-                        temp1 = temp2*<double>(j-k-1)
-                        y1iii += temp1
-                        temp2 = temp1*<double>(j-k-1)
-                        y1iv += temp2
-
-                local_sums[0][iloc] = y10
-                local_sums[1][iloc] = y1i
-                local_sums[2][iloc] = y1ii
-                local_sums[3][iloc] = y1iii
-                local_sums[4][iloc] = y1iv
-            else:
-                y00 = y10
-                y0i = y1i
-                y0ii = y1ii
-                y0iii = y1iii
-                y0iv = y1iv
-
-                y10 = y00 + series[i+scale]-series[i]
-                temp1 = series[i]*<double>(k+1)
-                temp2 = series[i+scale]*<double>k
-                y1i = y0i - y00 + temp1 + temp2
-                temp1 = temp1*<double>(k+1)
-                temp2 = temp2*<double>k
-                y1ii = y0ii - 2*y0i + y00 - temp1 + temp2
-                temp1 = temp1*<double>(k+1)
-                temp2 = temp2*<double>k
-                y1iii = y0iii - 3*y0ii + 3*y0i - y00 + temp1 + temp2
-                y1iv = y0iv - 4*y0iii + 6* y0ii - 4 * y0i + y00 - temp1 *<double>(k+1) + temp2*<double>k
-            
-            a0 = c[0]*y10+c[1]*y1ii+c[2]*y1iv
-
-            temp1 = (series[i+ic] - a0)
-            f2 += (temp1*temp1)**(q/2)
-
-        f2 = (f2/<double>(itemp+1))**(1/q)
-
-    else:
-        f2 = 0
-        
+        f2 = pow(f2/<double>(n), 1.0/q)
+    
     return f2
