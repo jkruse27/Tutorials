@@ -5,21 +5,14 @@
 
 import numpy as np
 cimport numpy as np
+from scipy import signal
 from libc.stdlib cimport malloc, free, realloc, qsort
-# CHANGED: Added fabs here, removed abs from stdlib
 from libc.math cimport isnan, NAN, floor, round, fabs 
-
-# ==========================================
-# 1. Structs & Constants
-# ==========================================
+from hrv_utils.dma import create_scales, dma
 
 cdef struct Point:
     double time
     double rri
-
-# ==========================================
-# 2. C Helper Functions
-# ==========================================
 
 cdef int compare_points(const void *a, const void *b) noexcept nogil:
     cdef double t_a = (<Point*>a).time
@@ -307,3 +300,94 @@ def clean_and_resample_pipeline(np.ndarray[double, ndim=1] rri_raw,
     resampled = resample_signal(cleaned['time'], cleaned['rri'], t_sec)
     
     return resampled
+
+
+def compute_alphas(rri, order=0, top_limit=1024, lower_limit=11, resample=200):
+    limit1 = np.log10(lower_limit)
+    limit2 = np.log10(top_limit)
+    scales = create_scales(3, len(rri)/2).astype(np.int64)
+    
+    if (top_limit is None):
+        top_limit = scales[-1]
+    else:
+        scales = scales[:np.argmax(scales>top_limit)+1]
+
+    if (len(rri) <= 2*top_limit):
+        return np.nan, np.nan, np.nan, np.nan
+
+    coefs = np.log10(dma(rri, scales, order=order))
+    scales = np.log10(scales)
+
+    fit1 = np.polyfit(
+        scales[(scales <= limit1)],
+        coefs[(scales <= limit1)],
+        1
+    )
+    alpha1 = fit1[0]
+    fit2 = np.polyfit(
+        scales[(scales >= limit1) & (scales <= limit2)],
+        coefs[(scales >= limit1) & (scales <= limit2)],
+        1
+    )
+    alpha2 = fit2[0]
+
+    if (resample is None):
+        new_scales = scales
+        profile = coefs
+    else:
+        new_scales = np.linspace(scales[0], limit2, resample)
+        profile = np.interp(new_scales, scales, coefs)
+
+    return alpha1, alpha2, profile, new_scales
+
+
+def spectral_indices(rri, fs=4, nfft=4096):
+    try:
+        nni_normalized = rri - np.mean(rri)
+
+        freq, psd = signal.welch(
+                        x=nni_normalized,
+                        fs=fs,
+                        window='hann',
+                        nfft=nfft
+                    )
+
+        vlf_indexes = np.logical_and(freq >= 0.003, freq < 0.04)
+        lf_indexes = np.logical_and(freq >= 0.04, freq < 0.15)
+        hf_indexes = np.logical_and(freq >= 0.15, freq < 0.40)
+
+        lf = np.trapz(y=psd[lf_indexes], x=freq[lf_indexes])
+        hf = np.trapz(y=psd[hf_indexes], x=freq[hf_indexes])
+
+        vlf = np.trapz(y=psd[vlf_indexes], x=freq[vlf_indexes])
+        total_power = vlf + lf + hf
+        if (hf != 0):
+            lfhf = lf/hf
+        else:
+            lfhf = None
+
+        return {'VLF': vlf, 'LF': lf, 'HF': hf,
+                'LF/HF ratio': lfhf, 'Total power': total_power}
+    except Exception as e:
+        print(e)
+        return {'VLF': np.nan, 'LF': np.nan, 'HF': np.nan,
+                'LF/HF ratio': np.nan, 'Total power': np.nan}
+
+
+def time_indices(rri):
+    diffs = np.diff(rri)
+    meannn = np.mean(rri) if len(rri) > 0 else np.nan
+    sdnn = np.std(rri, ddof=1) if len(rri) > 0 else np.nan
+    rmssd = np.sqrt(
+                np.mean(np.pow(diffs, 2))
+                ) if len(rri) > 0 else np.nan
+    sdsd = np.std(diffs) if len(rri) > 0 else np.nan
+    minimum = np.min(rri) if len(rri) > 0 else np.nan
+    maximum = np.max(rri) if len(rri) > 0 else np.nan
+
+    return {'mean NN': meannn,
+            'SDNN': sdnn,
+            'RMSSD': rmssd,
+            'SDSD': sdsd,
+            'min': minimum,
+            'max': maximum}

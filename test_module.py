@@ -256,11 +256,10 @@ def run_lambda_comparison(orig_dir, gt_csv_path, scale_sec=25, t_sec=0.5):
 
 
 def test_dma_vs_c_output(ORIG_DIR, DMA_DIR, order):
-    out_files = glob.glob(os.path.join(DMA0_DIR, "*.csv"))
+    out_files = glob.glob(os.path.join(DMA_DIR, "*.csv"))
 
     for c_output_file in out_files:
         df = pd.read_csv(c_output_file, header=None)
-
         c_log_scales = df.iloc[:, 2].values
         scales = np.round(10**c_log_scales).astype(np.int_)
 
@@ -296,13 +295,12 @@ def test_synthetic_lambdas(target_lambdas):
     for gt_lambda in target_lambdas:
         my_lambda = 0
         for i in range(K):
-            signal = nongaussian.generate_cascade_series(
-                gt_lambda,
+            signal = nongaussian.generate_nongaussian(
                 14,
-                1
+                gt_lambda,
+                3
             )
-            signal_norm = (signal - np.mean(signal)) / np.std(signal)
-            lambdas_sq = nongaussian.nongaussian_index(signal_norm, 0.5)
+            lambdas_sq = nongaussian.nongaussian_index(signal, 0.25)
 
             my_lambda += np.abs(lambdas_sq)
 

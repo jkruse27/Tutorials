@@ -28,7 +28,10 @@ def dma(
     q = 2,
     integrate = 1
     ):
-
+    if (order == 2):
+        scales = scales[scales > 4]
+    elif (order == 4):
+        scales = scales[scales > 6]
     if(q == 2):
         return np.sqrt(np.asarray(
             compute_dma(series, scales, order, integrate)
@@ -66,7 +69,6 @@ cdef double[:] compute_dma(
     
     if(i_refresh > n): i_refresh = n
 
-    # Initialize with zeros to prevent NaN from garbage memory
     local_sum = np.zeros((5, <long>(n/i_refresh)+2), dtype=np.float64)
     f2 = np.empty(n_scales)
 
@@ -177,7 +179,6 @@ cdef double estimate_f2(
         for i in range(0, itemp):
             if((i+1) % i_refresh == 0):
                 y10=0
-                # DMA0 specific refresh logic
                 for j in range(1, scale+1):
                     if(i+j < n):
                         y10 += series[i+j]
@@ -185,7 +186,6 @@ cdef double estimate_f2(
                 y10 += series[i+scale] - series[i]
 
             a0 = c[0]*y10
-            # FIX: Restored +1. The window is shifted by i+1, so center is ic+i+1.
             temp = (series[i + ic + 1] - a0)
             f2 += temp*temp
 
@@ -240,7 +240,6 @@ cdef double estimate_f2(
                     y1ii = local_sums[2][iloc] + 2*local_sums[1][iloc]*nn1 + local_sums[0][iloc]*nn2
 
                 for j in range(i0, scale):
-                    # FIX: series[i+1+j] ensures we sum the window for step i+1
                     if(i + 1 + j < n):
                         y10 += series[i+1+j]
                         temp1 = series[i+1+j]*<double>(j-k)
@@ -268,7 +267,6 @@ cdef double estimate_f2(
                 y1ii = y0ii - 2*y0i + y00 - temp1 + temp2
 
             a0 = c[0]*y10 + c[1]*y1ii
-            # FIX: Restored +1 for correct alignment
             temp1 = (series[i + ic + 1] - a0)
             f2 += temp1*temp1
 
@@ -337,7 +335,6 @@ cdef double estimate_f2(
                     y1iv = local_sums[4][iloc] + 4*local_sums[3][iloc]*nn1 + 6*local_sums[2][iloc]*nn2 + 4*local_sums[1][iloc]*nn3 + local_sums[0][iloc]*nn4
                 
                 for j in range(i0, scale):
-                    # FIX: series[i+1+j] ensures we sum the window for step i+1
                     if(i + 1 + j < n):
                         y10 += series[i+1+j]
                         temp1 = series[i+1+j]*<double>(j-k)
@@ -379,7 +376,6 @@ cdef double estimate_f2(
                 y1iv = y0iv - 4*y0iii + 6* y0ii - 4 * y0i + y00 - temp1 *<double>(k+1) + temp2*<double>k
             
             a0 = c[0]*y10 + c[1]*y1ii + c[2]*y1iv
-            # FIX: Restored +1 for correct alignment
             temp1 = (series[i + ic + 1] - a0)
             f2 += temp1*temp1
 
@@ -434,7 +430,6 @@ cdef double estimate_f2_q(
                 y10 += series[i+scale] - series[i]
 
             a0 = c[0]*y10
-            # FIX: Restored +1 for correct alignment
             temp = (series[i + ic + 1] - a0)
             f2 += pow(temp*temp, q/2.0)
 

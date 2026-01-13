@@ -6,15 +6,16 @@
 
 import numpy as np
 cimport numpy as cnp
+import cython
 from libc.stdlib cimport rand, RAND_MAX, srand
-from libc.math cimport log, fabs, pow, M_PI, lgamma, isnan, sqrt, isinf, exp, cos, sin
+from libc.math cimport log, fabs, pow, M_PI, lgamma, isnan, sqrt, isinf, exp
 from libc.time cimport time
 from scipy.linalg import pinv
 
 cdef double EULER_MASCHERONI = 0.57721566490153286060
 cdef double M_CONST = (EULER_MASCHERONI + log(2.0)) / 2.0
 cdef double LOG_PI_DIV_2 = log(M_PI) / 2.0
-
+cnp.import_array()
 
 def sgolay(int p, int n, int m=0, double ts=1.0):
     """
@@ -266,55 +267,112 @@ cdef double _calc_case_general(double[:] x, double q) nogil:
     return pre_factor * term
 
 
-def generate_cascade_series(double lambda2_total, int n_level, int n_base):
-    cdef double lambda2_per_level = lambda2_total / n_level
-    cdef double sigma_logw = sqrt(lambda2_per_level)
-    cdef double mu = -lambda2_per_level / 2.0
-    cdef double two_pi = 2.0 * M_PI
-    srand(time(NULL))
-    cdef cnp.ndarray[cnp.double_t, ndim=1] weights = np.ones(n_base, dtype=np.float64)
-    cdef cnp.ndarray[cnp.double_t, ndim=1] new_weights
-
-    cdef double[:] w_view
-    cdef double[:] new_w_view
-
-    cdef int lev, i, n_parent, idx_l, idx_r
-    cdef double u1, u2, z1, z2, mag, w_val
-
-    for lev in range(n_level):
-        n_parent = weights.shape[0]
-        new_weights = np.empty(n_parent * 2, dtype=np.float64)
-        w_view = weights
-        new_w_view = new_weights
-
-        for i in range(n_parent):
-            u1 = (rand() + 1.0) / (RAND_MAX + 2.0)
-            u2 = (rand() + 1.0) / (RAND_MAX + 2.0)
-
-            mag = sqrt(-2.0 * log(u1))
-            z1 = mag * cos(two_pi * u2)
-            z2 = mag * sin(two_pi * u2)
-
-            w_val = w_view[i]
-            new_w_view[2 * i] = w_val * exp(mu + (sigma_logw * z1))
-            new_w_view[2 * i + 1] = w_val * exp(mu + (sigma_logw * z2))
-
-        weights = new_weights
-
-    cdef int n_final = weights.shape[0]
-    w_view = weights
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cdef void _renormalize_inplace(double[:] x, double new_std, double new_mu) noexcept nogil:
+    """
+    C-level helper to renormalize an array in-place.
+    """
+    cdef Py_ssize_t i
+    cdef Py_ssize_t n = x.shape[0]
+    cdef double sum_x = 0.0
+    cdef double sum_sq_diff = 0.0
+    cdef double mean, std, val
     
-    for i in range(0, n_final, 2):
-        u1 = (rand() + 1.0) / (RAND_MAX + 2.0)
-        u2 = (rand() + 1.0) / (RAND_MAX + 2.0)
-        
-        mag = sqrt(-2.0 * log(u1))
-        z1 = mag * cos(two_pi * u2)
-        z2 = mag * sin(two_pi * u2)
-        
-        w_view[i] *= z1
+    # 1. Calculate Mean
+    for i in range(n):
+        sum_x += x[i]
+    mean = sum_x / n
+    
+    # 2. Calculate Standard Deviation
+    for i in range(n):
+        sum_sq_diff += (x[i] - mean) * (x[i] - mean)
+    
+    # Handle edge case where array is constant or empty
+    if n > 0 and sum_sq_diff > 0:
+        std = sqrt(sum_sq_diff / n)
+    else:
+        std = 1.0 
 
-        if i + 1 < n_final:
-            w_view[i + 1] *= z2
-            
-    return weights
+    # 3. Transform in-place
+    # Formula: (x - mean) / std * new_std - new_mu
+    cdef double factor = new_std / std
+    
+    for i in range(n):
+        x[i] = (x[i] - mean) * factor - new_mu
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+def renormalize(cnp.ndarray[cnp.double_t, ndim=1] x, double std, double mu):
+    """
+    Python-exposed wrapper if you need to call renormalize independently.
+    Returns a new array to match original Python behavior.
+    """
+    cdef cnp.ndarray[cnp.double_t, ndim=1] x_copy = x.copy()
+    _renormalize_inplace(x_copy, std, mu)
+    return x_copy
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+def generate_nongaussian(
+    int m,
+    double lmd2,
+    int n0
+):
+    """
+    Cython optimized generation of non-gaussian series.
+    """
+    cdef:
+        double lmd2e = lmd2 / m
+        double lmd0 = sqrt(lmd2e)
+        Py_ssize_t total_len = n0 * (1 << m)  # n0 * 2^m
+        Py_ssize_t i, j, k
+        Py_ssize_t layer_len, repeat_count
+        
+        # We allocate the accumulator ONCE. 
+        # Original code summed a list of arrays; we sum as we go.
+        cnp.ndarray[cnp.double_t, ndim=1] accumulator = np.zeros(total_len, dtype=np.float64)
+        double[:] acc_view = accumulator
+        
+        # Temporary buffer for the current layer's noise
+        cnp.ndarray[cnp.double_t, ndim=1] noise_layer
+        double[:] noise_view
+        double val
+
+    # Loop through cascading levels
+    for i in range(m):
+        layer_len = n0 * (1 << i)
+        repeat_count = 1 << (m - i)
+        
+        # Generate random normal numbers (Numpy is fast enough for generation)
+        noise_layer = np.random.normal(size=layer_len)
+        noise_view = noise_layer
+        
+        # 1. Renormalize this small layer in-place (no GIL)
+        with nogil:
+            _renormalize_inplace(noise_view, lmd0, lmd2e)
+        
+            # 2. Add to accumulator with repetition (simulating np.repeat)
+            # This avoids creating the massive expanded array in memory
+            for j in range(layer_len):
+                val = noise_view[j]
+                for k in range(repeat_count):
+                    # We map the smaller layer onto the total length
+                    # equivalent to: np.repeat(noise, repeat_count)
+                    acc_view[j * repeat_count + k] += val
+
+    # Final transformation: exp(sum) * new_noise
+    # We can do this efficiently in Numpy or a simple loop. 
+    # Since we need to generate new noise anyway, Numpy is clean here.
+    cdef cnp.ndarray[cnp.double_t, ndim=1] final_noise = np.random.normal(size=total_len)
+    
+    # In-place exponentiation and multiplication
+    # x = exp(x)
+    np.exp(accumulator, out=accumulator)
+    # x = x * final_noise
+    np.multiply(accumulator, final_noise, out=accumulator)
+
+    return accumulator
