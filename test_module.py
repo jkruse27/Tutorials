@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import glob
 import sys
+import time
 
 sys.path.append(os.getcwd())
 
@@ -10,6 +11,7 @@ try:
     from hrv_utils import rri_utils
     from hrv_utils import nongaussian
     from hrv_utils import dma
+    from hrv_utils import utils
 except ImportError:
     print("❌ Could not import 'hrv_utils'.")
     sys.exit(1)
@@ -316,6 +318,89 @@ def test_synthetic_lambdas(target_lambdas):
         print(f"{name_display:<30} | {status_icon:<10} | {details}")
 
 
+def test_surrogates(orig_dir, n=100):
+    print(
+     f"{'FILENAME':<30} | {'STATUS':<10} | {'TIME (s)':<10} | {'DETAILS':<25}"
+    )
+    print("-" * 95)
+
+    files = glob.glob(os.path.join(orig_dir, "*.csv"))
+
+    if not files:
+        print(f"No .csv files found in {orig_dir}")
+        return
+
+    fig_dir = os.path.join(orig_dir, "surrogate_tests")
+    os.makedirs(fig_dir, exist_ok=True)
+
+    for f_path in files:
+
+        start_time = time.perf_counter()
+
+        filename = os.path.basename(f_path)
+
+        try:
+            x = np.loadtxt(f_path, delimiter=",")
+        except Exception as e:
+            print(
+             f"{filename:<30} | ❌ ERROR     | {'-':<10} | Read error: {e}"
+            )
+            continue
+
+        if x.ndim > 1:
+            x = x[:, 0]
+
+        if len(x) < 16:
+            print(
+             f"{filename:<30} | ❌ FAILED    | {'-':<10} | Signal too short"
+            )
+            continue
+
+        try:
+            surrogates, spec_errors, converged = utils.iaaft_surrogates(
+                x, n_surrogates=n
+                )
+        except Exception as e:
+            print(
+             f"{filename:<30} | ❌ ERROR     | {'-':<10} | Surrogate gen: {e}"
+            )
+            continue
+
+        orig_spec = np.abs(np.fft.rfft(x))
+
+        spec_diffs = []
+        dist_diffs = []
+
+        x_sorted = np.sort(x)
+
+        for s in surrogates:
+            s_spec = np.abs(np.fft.rfft(s))
+            norm1 = np.linalg.norm(orig_spec - s_spec)
+            spec_diff = norm1 / np.linalg.norm(orig_spec)
+            spec_diffs.append(spec_diff)
+
+            dist_diff = np.mean(np.abs(np.sort(s) - x_sorted))
+            dist_diffs.append(dist_diff)
+
+        spec_diffs = np.array(spec_diffs)
+        dist_diffs = np.array(dist_diffs)
+
+        mean_spec = spec_diffs.mean()
+        mean_dist = dist_diffs.mean()
+
+        passed = (mean_spec < 5e-3) and (mean_dist < 1e-10)
+
+        status_icon = "✅ PASSED" if passed else "❌ FAILED"
+
+        details = f"Spec:{mean_spec:.2e}, Dist:{mean_dist:.2e}"
+
+        elapsed = time.perf_counter() - start_time
+
+        print(
+         f"{filename:<30} | {status_icon:<10} | {elapsed:<10.3f} | {details}"
+        )
+
+
 if __name__ == "__main__":
     ORIG_DIR = "test/orig"
     PROC_DIR = "test/processed"
@@ -356,3 +441,8 @@ if __name__ == "__main__":
     print()
     print("DMA 4th order")
     test_dma_vs_c_output(ORIG_DIR, DMA4_DIR, 4)
+    print()
+    print("------------------------------------------------------------")
+    print()
+    print("Surrogate generation test")
+    test_surrogates(ORIG_DIR, n=100)

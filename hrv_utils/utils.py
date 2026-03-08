@@ -310,3 +310,78 @@ def read_file_hourly(
         current_window_start += step_size_hr
 
     return results
+
+
+def iaaft_surrogates(
+    x,
+    n_surrogates=10,
+    max_iter=500,
+    tol=1e-6,
+    seed=None,
+):
+    """
+    Fast vectorized IAAFT surrogate generator.
+
+    Parameters
+    ----------
+    x : array_like
+        Input signal
+    n_surrogates : int
+        Number of surrogates
+    max_iter : int
+        Maximum iterations
+    tol : float
+        Convergence tolerance
+    seed : int or None
+
+    Returns
+    -------
+    surrogates : ndarray (n_surrogates, n)
+    spec_errors : ndarray (n_surrogates,)
+    converged : ndarray (n_surrogates,)
+    """
+    rng = np.random.default_rng(seed)
+
+    x = np.asarray(x, dtype=np.float64)
+    n = x.size
+
+    x_sorted = np.sort(x)
+
+    target_amp = np.abs(np.fft.rfft(x))
+    norm_target = np.linalg.norm(target_amp) + 1e-30
+
+    Y = np.empty((n_surrogates, n))
+
+    for i in range(n_surrogates):
+        Y[i] = rng.permutation(x)
+
+    prev_error = np.full(n_surrogates, np.inf)
+    converged = np.zeros(n_surrogates, dtype=bool)
+
+    for _ in range(max_iter):
+        fft_y = np.fft.rfft(Y, axis=1)
+
+        mag = np.abs(fft_y)
+        phases = fft_y / (mag + 1e-30)
+
+        Z = np.fft.irfft(target_amp * phases, n, axis=1)
+
+        for i in range(n_surrogates):
+            order = np.argsort(Z[i])
+            Y[i, order] = x_sorted
+
+        spec = np.abs(np.fft.rfft(Y, axis=1))
+        spec_errors = (
+            np.linalg.norm(spec - target_amp, axis=1) / norm_target
+        )
+        improvement = np.abs(prev_error - spec_errors)
+
+        newly_converged = (spec_errors < tol) | (improvement < tol)
+        converged |= newly_converged
+
+        if converged.all():
+            break
+
+        prev_error = spec_errors
+
+    return Y, spec_errors, converged
