@@ -2,6 +2,7 @@ import re
 import numpy as np
 import pandas as pd
 from scipy.signal import savgol_filter
+from scipy.fft import rfft, irfft
 from hrv_utils import rri_utils
 
 
@@ -316,72 +317,91 @@ def iaaft_surrogates(
     x,
     n_surrogates=10,
     max_iter=500,
-    tol=1e-6,
+    tol=1e-4,
     seed=None,
+    dtype=np.float32,
+    workers=-1,
 ):
     """
-    Fast vectorized IAAFT surrogate generator.
+    Fast IAAFT surrogate generator.
+
+    Generates surrogates that share the amplitude spectrum and amplitude
+    distribution of the input signal, with randomised phases — used for
+    testing for nonlinearity / stationarity in time-series analysis.
 
     Parameters
     ----------
-    x : array_like
-        Input signal
-    n_surrogates : int
-        Number of surrogates
-    max_iter : int
-        Maximum iterations
-    tol : float
-        Convergence tolerance
+    x : array_like, shape (n,)
+        Input signal (1-D).
+    n_surrogates : int, default 10
+        Number of independent surrogates to generate.
+    max_iter : int, default 500
+        Maximum IAAFT iterations before declaring non-convergence.
+    tol : float, default 1e-6
+        Convergence threshold on normalised spectral error.  Iteration stops
+        for a surrogate when ``error < tol`` or ``|Δerror| < tol``.
     seed : int or None
+        Seed for the random-number generator (reproducibility).
 
     Returns
     -------
-    surrogates : ndarray (n_surrogates, n)
-    spec_errors : ndarray (n_surrogates,)
-    converged : ndarray (n_surrogates,)
+    surrogates : ndarray, shape (n_surrogates, n)
+        The generated surrogate time series.
+    spec_errors : ndarray, shape (n_surrogates,)
+        Normalised spectral error at convergence (or last iteration).
+    converged : ndarray of bool, shape (n_surrogates,)
+        ``True`` for each surrogate that met the convergence criterion.
     """
     rng = np.random.default_rng(seed)
-
-    x = np.asarray(x, dtype=np.float64)
+    x = np.asarray(x, dtype=dtype)
     n = x.size
 
+    _fft_kw = dict(n=n, axis=1, workers=workers)
+
     x_sorted = np.sort(x)
+    target_amp = np.abs(rfft(x, workers=workers)).astype(dtype)
+    norm_target = float(np.linalg.norm(target_amp)) + 1e-30
 
-    target_amp = np.abs(np.fft.rfft(x))
-    norm_target = np.linalg.norm(target_amp) + 1e-30
-
-    Y = np.empty((n_surrogates, n))
-
-    for i in range(n_surrogates):
-        Y[i] = rng.permutation(x)
+    Y = np.array([rng.permutation(x) for _ in range(n_surrogates)])
 
     prev_error = np.full(n_surrogates, np.inf)
     converged = np.zeros(n_surrogates, dtype=bool)
+    active = np.ones(n_surrogates,  dtype=bool)
+
+    fft_y = rfft(Y, **_fft_kw)
+    _eps = dtype(1e-7)
 
     for _ in range(max_iter):
-        fft_y = np.fft.rfft(Y, axis=1)
-
-        mag = np.abs(fft_y)
-        phases = fft_y / (mag + 1e-30)
-
-        Z = np.fft.irfft(target_amp * phases, n, axis=1)
-
-        for i in range(n_surrogates):
-            order = np.argsort(Z[i])
-            Y[i, order] = x_sorted
-
-        spec = np.abs(np.fft.rfft(Y, axis=1))
-        spec_errors = (
-            np.linalg.norm(spec - target_amp, axis=1) / norm_target
-        )
-        improvement = np.abs(prev_error - spec_errors)
-
-        newly_converged = (spec_errors < tol) | (improvement < tol)
-        converged |= newly_converged
-
-        if converged.all():
+        if not active.any():
             break
 
-        prev_error = spec_errors
+        act = np.where(active)[0]
+        fy = fft_y[act]
 
-    return Y, spec_errors, converged
+        phases = fy / (np.abs(fy) + _eps)
+        Z = irfft(target_amp * phases, **_fft_kw)
+
+        order = np.argsort(Z, axis=1)
+        Y[act[:, None], order] = x_sorted
+
+        fy_new = rfft(Y[act], **_fft_kw)
+        fft_y[act] = fy_new
+
+        diff = np.abs(fy_new) - target_amp
+        spec_err_act = (
+            np.sqrt(np.einsum('ij,ij->i', diff, diff)) / norm_target
+        ).astype(np.float64)
+
+        improvement = np.abs(prev_error[act] - spec_err_act)
+
+        truly_converged = spec_err_act < tol
+        converged[act[truly_converged]] = True
+        active[act[truly_converged]] = False
+
+        prev_error[act] = spec_err_act
+
+        remaining = np.where(active)[0]
+        if remaining.size > 0 and np.all(improvement[~truly_converged] < tol):
+            break
+
+    return Y.astype(np.float64), prev_error, converged
