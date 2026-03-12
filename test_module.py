@@ -318,6 +318,109 @@ def test_synthetic_lambdas(target_lambdas):
         print(f"{name_display:<30} | {status_icon:<10} | {details}")
 
 
+def test_nongauss_time(orig_dir):
+    print(
+     f"{'FILENAME':<30} | {'STATUS':<10} | {'TIME (s)':<10}"
+    )
+    print("-" * 95)
+
+    files = glob.glob(os.path.join(orig_dir, "*.csv"))
+
+    if not files:
+        print(f"No .csv files found in {orig_dir}")
+        return
+
+    fig_dir = os.path.join(orig_dir, "surrogate_tests")
+    os.makedirs(fig_dir, exist_ok=True)
+
+    for f_path in files:
+
+        start_time = time.perf_counter()
+
+        filename = os.path.basename(f_path)
+
+        try:
+            x = read_ground_truth(f_path)
+        except Exception as e:
+            print(
+             f"{filename:<30} | ❌ ERROR     | {'-':<10} | Read error: {e}"
+            )
+            continue
+
+        if x.ndim > 1:
+            x = x[:, 0]
+
+        if len(x) < 16:
+            print(
+             f"{filename:<30} | ❌ FAILED    | {'-':<10} | Signal too short"
+            )
+            continue
+
+        scales = dma.create_scales(5, 2048 * 2).astype(np.int64)
+        nongaussian.nongaussian_analysis_batch(
+            np.array([x for i in range(100)]), scales, n_jobs=-1
+        )
+        status_icon = "✅ FINISHED"
+
+        elapsed = time.perf_counter() - start_time
+
+        print(
+         f"{filename:<30} | {status_icon:<10} | {elapsed:<10.3f}"
+        )
+
+
+def test_parallel_nongauss(orig_dir):
+    print(
+     f"{'FILENAME':<30} | {'STATUS':<10} | {'Details':<10}"
+    )
+    print("-" * 95)
+
+    files = glob.glob(os.path.join(orig_dir, "*.csv"))
+
+    if not files:
+        print(f"No .csv files found in {orig_dir}")
+        return
+
+    fig_dir = os.path.join(orig_dir, "surrogate_tests")
+    os.makedirs(fig_dir, exist_ok=True)
+
+    for f_path in files:
+        filename = os.path.basename(f_path)
+        try:
+            x = read_ground_truth(f_path)
+        except Exception as e:
+            print(
+             f"{filename:<30} | ❌ ERROR     | {'-':<10} | Read error: {e}"
+            )
+            continue
+
+        if x.ndim > 1:
+            x = x[:, 0]
+
+        if len(x) < 16:
+            print(
+             f"{filename:<30} | ❌ FAILED    | {'-':<10} | Signal too short"
+            )
+            continue
+
+        scales = dma.create_scales(5, 2048 * 2).astype(np.int64)
+        ser = nongaussian.nongaussian_analysis_batch(
+            np.array([x for i in range(2)]), scales, n_jobs=-1
+        )[0][:, 0]
+        other, _ = nongaussian.nongaussian_analysis(x, scales)
+
+        diff = np.abs(ser - other)
+        mean_err = np.mean(diff)
+        max_err = np.max(diff)
+
+        is_passed = (mean_err < 0.001) and (max_err < 0.001)
+        status_icon = "✅ PASSED" if is_passed else "❌ FAILED"
+        details = f"(Mean: {mean_err:.2f}, Max: {max_err:.2f})"
+        print(
+         f"{filename:<30} | {status_icon:<10} | {details}"
+        )
+
+
 def test_surrogates(orig_dir, n=100):
     print(
      f"{'FILENAME':<30} | {'STATUS':<10} | {'TIME (s)':<10} | {'DETAILS':<25}"
@@ -340,7 +443,7 @@ def test_surrogates(orig_dir, n=100):
         filename = os.path.basename(f_path)
 
         try:
-            x = np.loadtxt(f_path, delimiter=",")
+            x = read_ground_truth(f_path)
         except Exception as e:
             print(
              f"{filename:<30} | ❌ ERROR     | {'-':<10} | Read error: {e}"
@@ -389,10 +492,11 @@ def test_surrogates(orig_dir, n=100):
         mean_dist = dist_diffs.mean()
 
         passed = (mean_spec < 5e-3) and (mean_dist < 1e-10)
-
+        conv = np.sum(converged)
         status_icon = "✅ PASSED" if passed else "❌ FAILED"
 
         details = f"Spec:{mean_spec:.2e}, Dist:{mean_dist:.2e}"
+        details += f", Converged: {conv}/100"
 
         elapsed = time.perf_counter() - start_time
 
@@ -424,6 +528,16 @@ if __name__ == "__main__":
     print()
     print("------------------------------------------------------------")
     print()
+    print("PARALLEL vs STANDARD NON-GAUSSIAN")
+    test_parallel_nongauss(PROC_DIR)
+    print()
+    print("------------------------------------------------------------")
+    print()
+    print("NON-GAUSSIAN INDEX COMPUTATION TIME")
+    test_nongauss_time(PROC_DIR)
+    print()
+    print("------------------------------------------------------------")
+    print()
     print("NON-GAUSSIAN GENERATION EVALUATION")
     test_synthetic_lambdas(np.arange(0, 1, 0.1, dtype=np.float64))
     print()
@@ -445,4 +559,4 @@ if __name__ == "__main__":
     print("------------------------------------------------------------")
     print()
     print("Surrogate generation test")
-    test_surrogates(ORIG_DIR, n=100)
+    test_surrogates(PROC_DIR, n=100)

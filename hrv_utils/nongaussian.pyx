@@ -4,6 +4,12 @@
 # cython: wraparound=False
 # cython: cdivision=True
 
+from __future__ import annotations
+ 
+import math
+from scipy.signal import savgol_filter, savgol_coeffs
+from scipy.special import gammaln
+from joblib import Parallel, delayed
 import numpy as np
 cimport numpy as cnp
 import cython
@@ -15,6 +21,9 @@ from scipy.linalg import pinv
 cdef double EULER_MASCHERONI = 0.57721566490153286060
 cdef double M_CONST = (EULER_MASCHERONI + log(2.0)) / 2.0
 cdef double LOG_PI_DIV_2 = log(M_PI) / 2.0
+_LOG2 = math.log(2.0)
+_LOG_PI_DIV_2 = math.log(math.pi) / 2.0
+_M_CONST = (math.log(2.0) + math.log(math.pi)) / 2.0 - math.log(2.0) / 2.0
 cnp.import_array()
 
 def sgolay(int p, int n, int m=0, double ts=1.0):
@@ -376,3 +385,170 @@ def generate_nongaussian(
     np.multiply(accumulator, final_noise, out=accumulator)
 
     return accumulator
+
+
+def _lambda_batch(dy: np.ndarray, q: float, tol: float = 1e-3) -> np.ndarray:
+    """
+    Compute lambda^2 for a batch of normalised increment series.
+ 
+    Parameters
+    ----------
+    dy : ndarray, shape (n_surrogates, n_samples)
+        Normalised increments.  NaN/Inf values are ignored (nanmean).
+    q  : float
+        Moment order.
+ 
+    Returns
+    -------
+    lam_sq : ndarray, shape (n_surrogates,)
+    """
+    if abs(q) <= tol:
+        # q = 0 case:  -(E[log|x|] + M_CONST)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_abs = np.log(np.abs(dy))
+        log_abs[~np.isfinite(log_abs)] = np.nan
+        return -(np.nanmean(log_abs, axis=1) + _M_CONST)
+ 
+    if abs(q - 2.0) <= tol:
+        # q = 2 case:  E[x^2 * log|x|] + M_CONST - 1
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_abs = np.log(np.abs(dy))
+        vals = dy ** 2 * log_abs
+        vals[~np.isfinite(vals)] = np.nan
+        return np.nanmean(vals, axis=1) + _M_CONST - 1.0
+ 
+    # General case
+    with np.errstate(invalid="ignore"):
+        abs_pow = np.abs(dy) ** q          # (n_surrogates, n_samples)
+    abs_pow[~np.isfinite(abs_pow)] = np.nan
+    m_absq = np.nanmean(abs_pow, axis=1)   # (n_surrogates,)
+ 
+    c1 = -(_LOG2 * q / 2.0)
+    c2 = -gammaln((q + 1.0) / 2.0)
+    pre_factor = 2.0 / (q * (q - 2.0))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        term = _LOG_PI_DIV_2 + np.log(m_absq) + c1 + c2
+    return pre_factor * term
+ 
+ 
+# ── Per-scale worker (runs in parallel) ──────────────────────────────────── #
+ 
+def _process_scale(
+    Y_cumsum: np.ndarray,   # (n_surrogates, n)  float64
+    scale: int,
+    q: float,
+    m: int,
+    sg_coeffs: np.ndarray,  # precomputed for this scale
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Process one scale for the entire surrogate batch.
+ 
+    Returns
+    -------
+    lam_sq : ndarray, shape (n_surrogates,)
+    dy     : ndarray, shape (n_surrogates, n - scale)   normalised increments
+    """
+    # --- Savitzky-Golay detrend (all surrogates at once, axis=1) ----------- #
+    # scipy.signal.savgol_filter natively handles nd arrays along any axis.
+    # Passing precomputed coefficients avoids recomputing them per call.
+    y_sg = savgol_filter(Y_cumsum, window_length=scale, polyorder=m, axis=1)
+    y_detrend = Y_cumsum - y_sg                          # (n_surrogates, n)
+ 
+    # --- Increments --------------------------------------------------------- #
+    dy_raw = y_detrend[:, scale:] - y_detrend[:, :-scale]  # (n_surrogates, n-scale)
+ 
+    # --- Standardise (per surrogate) --------------------------------------- #
+    dy_mean = np.nanmean(dy_raw, axis=1, keepdims=True)
+    dy_std  = np.nanstd(dy_raw,  axis=1, keepdims=True, ddof=1)
+    dy_std  = np.where(dy_std == 0, 1.0, dy_std)
+    dy = (dy_raw - dy_mean) / dy_std
+ 
+    # --- Lambda ------------------------------------------------------------ #
+    lam_sq = _lambda_batch(dy, q)
+ 
+    return lam_sq, dy
+ 
+ 
+# ── Public API ────────────────────────────────────────────────────────────── #
+ 
+def nongaussian_analysis_batch(
+    surrogates: np.ndarray,
+    scales: np.ndarray,
+    q: float = 0.25,
+    m: int = 3,
+    n_jobs: int = 1,
+    return_curves: bool = False,
+) -> tuple[np.ndarray, list | None]:
+    """
+    Batch non-Gaussianity analysis over a range of scales.
+ 
+    Processes all surrogates simultaneously for each scale, which is far more
+    efficient than calling the per-surrogate function in a loop.
+ 
+    Parameters
+    ----------
+    surrogates : ndarray, shape (n_surrogates, n)
+        Surrogate (or original) time series, one per row.
+    scales : array_like of int
+        Window lengths for detrending.  Odd values are used; even values are
+        incremented by 1 (matches original behaviour).
+    q : float, default 0.25
+        Moment order for lambda^2.
+    m : int, default 3
+        Savitzky-Golay polynomial order.
+    n_jobs : int, default 1
+        Number of parallel workers for the scale loop.  -1 uses all cores.
+        Set to 1 to disable parallelism (safe for nested parallel calls).
+    return_curves : bool, default False
+        If True, also return the normalised increment arrays.  These are
+        ragged (each scale gives a different length), so they are returned
+        as a list of (n_surrogates, n - scale) arrays, one per scale.
+        Disable if not needed to avoid the memory cost.
+ 
+    Returns
+    -------
+    nongaussianity : ndarray, shape (n_scales, n_surrogates)
+        lambda^2 values.  Row i corresponds to scales[i].
+    curves : list of ndarray or None
+        Normalised increments per scale (only when return_curves=True).
+    """
+    surrogates = np.asarray(surrogates, dtype=np.float64)
+    if surrogates.ndim == 1:
+        surrogates = surrogates[np.newaxis, :]   # single signal → batch of 1
+    n_surrogates, n = surrogates.shape
+ 
+    scales = np.asarray(scales, dtype=np.intp)
+    # Enforce odd window lengths
+    scales = np.where(scales % 2 == 0, scales + 1, scales)
+    n_scales = scales.size
+ 
+    # ── Cumulative sum (profile), mean-centred — done once for all scales ── #
+    means = np.nanmean(surrogates, axis=1, keepdims=True)  # (n_surrogates, 1)
+    Y_cumsum = np.cumsum(surrogates - means, axis=1)       # (n_surrogates, n)
+ 
+    # ── Precompute SG coefficients per unique scale ─────────────────────── #
+    # savgol_coeffs is pure Python/C and cheap; hoisting it avoids repeated
+    # work inside joblib workers.
+    unique_scales = np.unique(scales)
+    sg_coeff_map = {
+        int(s): savgol_coeffs(int(s), m) for s in unique_scales
+    }
+ 
+    # ── Parallel scale loop ─────────────────────────────────────────────── #
+    def _job(scale):
+        return _process_scale(
+            Y_cumsum, int(scale), q, m, sg_coeff_map[int(scale)]
+        )
+ 
+    if n_jobs == 1:
+        results = [_job(s) for s in scales]
+    else:
+        results = Parallel(n_jobs=n_jobs, prefer="threads")(
+            delayed(_job)(s) for s in scales
+        )
+ 
+    # ── Assemble outputs ─────────────────────────────────────────────────── #
+    nongaussianity = np.stack([r[0] for r in results], axis=0)  # (n_scales, n_surrogates)
+    curves = [r[1] for r in results] if return_curves else None
+ 
+    return nongaussianity, curves

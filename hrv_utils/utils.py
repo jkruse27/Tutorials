@@ -316,92 +316,158 @@ def read_file_hourly(
 def iaaft_surrogates(
     x,
     n_surrogates=10,
-    max_iter=500,
+    max_iter=1000,
     tol=1e-4,
+    patience=30,
+    retry=True,
+    retry_patience=30,
     seed=None,
     dtype=np.float32,
     workers=-1,
 ):
-    """
-    Fast IAAFT surrogate generator.
-
-    Generates surrogates that share the amplitude spectrum and amplitude
-    distribution of the input signal, with randomised phases — used for
-    testing for nonlinearity / stationarity in time-series analysis.
-
-    Parameters
-    ----------
-    x : array_like, shape (n,)
-        Input signal (1-D).
-    n_surrogates : int, default 10
-        Number of independent surrogates to generate.
-    max_iter : int, default 500
-        Maximum IAAFT iterations before declaring non-convergence.
-    tol : float, default 1e-6
-        Convergence threshold on normalised spectral error.  Iteration stops
-        for a surrogate when ``error < tol`` or ``|Δerror| < tol``.
-    seed : int or None
-        Seed for the random-number generator (reproducibility).
-
-    Returns
-    -------
-    surrogates : ndarray, shape (n_surrogates, n)
-        The generated surrogate time series.
-    spec_errors : ndarray, shape (n_surrogates,)
-        Normalised spectral error at convergence (or last iteration).
-    converged : ndarray of bool, shape (n_surrogates,)
-        ``True`` for each surrogate that met the convergence criterion.
-    """
     rng = np.random.default_rng(seed)
-    x = np.asarray(x, dtype=dtype)
-    n = x.size
 
-    _fft_kw = dict(n=n, axis=1, workers=workers)
+    x_f64 = np.asarray(x, dtype=np.float64)
+    x_sorted_f64 = np.sort(x_f64)
 
+    x = x_f64.astype(dtype)
     x_sorted = np.sort(x)
+
+    n = x.size
     target_amp = np.abs(rfft(x, workers=workers)).astype(dtype)
     norm_target = float(np.linalg.norm(target_amp)) + 1e-30
-
-    Y = np.array([rng.permutation(x) for _ in range(n_surrogates)])
-
-    prev_error = np.full(n_surrogates, np.inf)
-    converged = np.zeros(n_surrogates, dtype=bool)
-    active = np.ones(n_surrogates,  dtype=bool)
-
-    fft_y = rfft(Y, **_fft_kw)
+    n_freq = target_amp.size
     _eps = dtype(1e-7)
+    _fft_kw = dict(n=n, axis=1, workers=workers)
 
-    for _ in range(max_iter):
-        if not active.any():
-            break
+    surrogates = np.empty((n_surrogates, n), dtype=np.float64)
+    spec_errors = np.full(n_surrogates, np.inf)
+    converged = np.zeros(n_surrogates, dtype=bool)
+    attempts = np.ones(n_surrogates, dtype=int)
 
-        act = np.where(active)[0]
-        fy = fft_y[act]
+    def _save_surrogate(out_row, y_row):
+        order = np.argsort(y_row)
+        out_row[order] = x_sorted_f64
 
-        phases = fy / (np.abs(fy) + _eps)
-        Z = irfft(target_amp * phases, **_fft_kw)
+    def _init_batch(k):
+        rand_phases = np.exp(
+            1j * rng.uniform(0.0, 2 * np.pi, (k, n_freq))
+        ).astype(np.complex64)
+        Y_freq = irfft(target_amp * rand_phases, **_fft_kw)
+        order = np.argsort(Y_freq, axis=1)
+        Y = np.empty((k, n), dtype=dtype)
+        Y[np.arange(k)[:, None], order] = x_sorted
+        return Y
 
-        order = np.argsort(Z, axis=1)
-        Y[act[:, None], order] = x_sorted
+    if not retry:
+        _stag_tol = tol * 0.1
 
-        fy_new = rfft(Y[act], **_fft_kw)
-        fft_y[act] = fy_new
+        Y = _init_batch(n_surrogates)
+        fft_y = rfft(Y, **_fft_kw)
+        prev_error = np.full(n_surrogates, np.inf)
+        stagnation = np.zeros(n_surrogates, dtype=np.int32)
+        active = np.ones(n_surrogates, dtype=bool)
 
-        diff = np.abs(fy_new) - target_amp
-        spec_err_act = (
-            np.sqrt(np.einsum('ij,ij->i', diff, diff)) / norm_target
-        ).astype(np.float64)
+        for _ in range(max_iter):
+            if not active.any():
+                break
 
-        improvement = np.abs(prev_error[act] - spec_err_act)
+            act = np.where(active)[0]
+            fy = fft_y[act]
 
-        truly_converged = spec_err_act < tol
-        converged[act[truly_converged]] = True
-        active[act[truly_converged]] = False
+            phases = fy / (np.abs(fy) + _eps)
+            Z = irfft(target_amp * phases, **_fft_kw)
+            order = np.argsort(Z, axis=1)
+            Y[act[:, None], order] = x_sorted
 
-        prev_error[act] = spec_err_act
+            fy_new = rfft(Y[act], **_fft_kw)
+            fft_y[act] = fy_new
 
-        remaining = np.where(active)[0]
-        if remaining.size > 0 and np.all(improvement[~truly_converged] < tol):
-            break
+            diff = np.abs(fy_new) - target_amp
+            spec_err_act = (
+                np.sqrt(np.einsum("ij,ij->i", diff, diff)) / norm_target
+            ).astype(np.float64)
 
-    return Y.astype(np.float64), prev_error, converged
+            improvement = np.abs(prev_error[act] - spec_err_act)
+            prev_error[act] = spec_err_act
+
+            hit_tol = spec_err_act < tol
+            converged[act[hit_tol]] = True
+            active[act[hit_tol]] = False
+
+            stagnated = improvement < _stag_tol
+            stagnation[act[stagnated]] += 1
+            stagnation[act[~stagnated]] = 0
+            timed_out = (stagnation[act] >= patience) & ~hit_tol
+            active[act[timed_out]] = False
+
+        spec_errors[:] = prev_error
+
+        for i in range(n_surrogates):
+            _save_surrogate(surrogates[i], Y[i])
+
+        return surrogates, spec_errors, converged
+
+    _stag_tol = tol * 0.1
+    pending = list(range(n_surrogates))
+
+    while pending:
+        batch_idx = np.array(pending, dtype=int)
+        k = len(batch_idx)
+
+        Y = _init_batch(k)
+        fft_y = rfft(Y, **_fft_kw)
+        prev_error_b = np.full(k, np.inf)
+        stagnation_b = np.zeros(k, dtype=np.int32)
+        active_b = np.ones(k, dtype=bool)
+
+        for _ in range(max_iter):
+            if not active_b.any():
+                break
+
+            loc = np.where(active_b)[0]
+            fy = fft_y[loc]
+
+            phases = fy / (np.abs(fy) + _eps)
+            Z = irfft(target_amp * phases, **_fft_kw)
+            order = np.argsort(Z, axis=1)
+            Y[loc[:, None], order] = x_sorted
+
+            fy_new = rfft(Y[loc], **_fft_kw)
+            fft_y[loc] = fy_new
+
+            diff = np.abs(fy_new) - target_amp
+            spec_err_loc = (
+                np.sqrt(np.einsum("ij,ij->i", diff, diff)) / norm_target
+            ).astype(np.float64)
+
+            improvement = np.abs(prev_error_b[loc] - spec_err_loc)
+            prev_error_b[loc] = spec_err_loc
+
+            hit_tol = spec_err_loc < tol
+            hit_loc = loc[hit_tol]
+            hit_global = batch_idx[hit_loc]
+            for li, gi in zip(hit_loc, hit_global):
+                _save_surrogate(surrogates[gi], Y[li])
+                spec_errors[gi] = prev_error_b[li]
+                converged[gi] = True
+            active_b[hit_loc] = False
+
+            stagnated = improvement < _stag_tol
+            stagnation_b[loc[stagnated]] += 1
+            stagnation_b[loc[~stagnated]] = 0
+            timed_out = (stagnation_b[loc] >= retry_patience) & ~hit_tol
+            active_b[loc[timed_out]] = False
+
+        for li, gi in enumerate(batch_idx):
+            if not converged[gi]:
+                spec_errors[gi] = prev_error_b[li]
+
+        newly_converged = {int(gi) for gi in batch_idx if converged[gi]}
+        for gi in newly_converged:
+            pending.remove(gi)
+        for gi in pending:
+            if gi in set(batch_idx.tolist()):
+                attempts[gi] += 1
+
+    return surrogates, spec_errors, converged
