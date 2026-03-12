@@ -324,6 +324,7 @@ def iaaft_surrogates(
     seed=None,
     dtype=np.float32,
     workers=-1,
+    max_retries=15
 ):
     rng = np.random.default_rng(seed)
 
@@ -412,6 +413,9 @@ def iaaft_surrogates(
     pending = list(range(n_surrogates))
 
     while pending:
+        if (max(attempts) > max_retries):
+            break
+
         batch_idx = np.array(pending, dtype=int)
         k = len(batch_idx)
 
