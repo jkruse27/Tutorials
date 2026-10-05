@@ -461,7 +461,7 @@ def test_surrogates(orig_dir, n=100):
 
         try:
             surrogates, spec_errors, converged = utils.iaaft_surrogates(
-                x, n_surrogates=n
+                x, n_surrogates=n, use_gpu=True
                 )
         except Exception as e:
             print(

@@ -7,3 +7,4 @@ pandas
 statsmodels
 keras
 Cython
+cupy-cuda12x

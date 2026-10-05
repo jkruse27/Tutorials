@@ -1,8 +1,10 @@
-FROM python:3.10-slim
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3-pip \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
@@ -12,6 +14,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN mkdir -p data/orig data/processed
 COPY . .
 
-RUN python setup.py build_ext --inplace
+RUN python3 setup.py build_ext --inplace
 
-CMD ["python", "test_module.py"]
+CMD ["python3", "test_module.py"]

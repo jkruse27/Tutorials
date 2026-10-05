@@ -314,23 +314,29 @@ def read_file_hourly(
 
 
 def iaaft_surrogates(
-    x,
-    n_surrogates=10,
-    max_iter=1000,
-    tol=1e-4,
-    patience=30,
-    retry=True,
-    retry_patience=30,
-    seed=None,
-    dtype=np.float32,
-    workers=-1,
-    max_retries=15
+    x, n_surrogates=10, max_iter=1000, tol=1e-4, patience=30,
+    retry=True, retry_patience=30, seed=None, dtype=np.float32,
+    workers=-1, max_retries=15, use_gpu=False
 ):
-    rng = np.random.default_rng(seed)
+    """Generate IAAFT surrogates using CPU or GPU."""
 
+    if use_gpu:
+        try:
+            import cupy as cp
+        except ImportError as e:
+            raise ImportError(
+                "use_gpu=True requires CuPy. Install the appropriate "
+                "CuPy package for your CUDA version."
+            ) from e
+
+        return _iaaft_surrogates_gpu(
+            x, n_surrogates, max_iter, tol, patience, retry,
+            retry_patience, seed, dtype, max_retries, cp
+        )
+
+    rng = np.random.default_rng(seed)
     x_f64 = np.asarray(x, dtype=np.float64)
     x_sorted_f64 = np.sort(x_f64)
-
     x = x_f64.astype(dtype)
     x_sorted = np.sort(x)
 
@@ -360,9 +366,9 @@ def iaaft_surrogates(
         Y[np.arange(k)[:, None], order] = x_sorted
         return Y
 
-    if not retry:
-        _stag_tol = tol * 0.1
+    _stag_tol = tol * 0.1
 
+    if not retry:
         Y = _init_batch(n_surrogates)
         fft_y = rfft(Y, **_fft_kw)
         prev_error = np.full(n_surrogates, np.inf)
@@ -375,7 +381,6 @@ def iaaft_surrogates(
 
             act = np.where(active)[0]
             fy = fft_y[act]
-
             phases = fy / (np.abs(fy) + _eps)
             Z = irfft(target_amp * phases, **_fft_kw)
             order = np.argsort(Z, axis=1)
@@ -399,6 +404,7 @@ def iaaft_surrogates(
             stagnated = improvement < _stag_tol
             stagnation[act[stagnated]] += 1
             stagnation[act[~stagnated]] = 0
+
             timed_out = (stagnation[act] >= patience) & ~hit_tol
             active[act[timed_out]] = False
 
@@ -409,11 +415,10 @@ def iaaft_surrogates(
 
         return surrogates, spec_errors, converged
 
-    _stag_tol = tol * 0.1
     pending = list(range(n_surrogates))
 
     while pending:
-        if (max(attempts) > max_retries):
+        if max(attempts) > max_retries:
             break
 
         batch_idx = np.array(pending, dtype=int)
@@ -431,7 +436,6 @@ def iaaft_surrogates(
 
             loc = np.where(active_b)[0]
             fy = fft_y[loc]
-
             phases = fy / (np.abs(fy) + _eps)
             Z = irfft(target_amp * phases, **_fft_kw)
             order = np.argsort(Z, axis=1)
@@ -451,16 +455,21 @@ def iaaft_surrogates(
             hit_tol = spec_err_loc < tol
             hit_loc = loc[hit_tol]
             hit_global = batch_idx[hit_loc]
+
             for li, gi in zip(hit_loc, hit_global):
                 _save_surrogate(surrogates[gi], Y[li])
                 spec_errors[gi] = prev_error_b[li]
                 converged[gi] = True
+
             active_b[hit_loc] = False
 
             stagnated = improvement < _stag_tol
             stagnation_b[loc[stagnated]] += 1
             stagnation_b[loc[~stagnated]] = 0
-            timed_out = (stagnation_b[loc] >= retry_patience) & ~hit_tol
+
+            timed_out = (
+                (stagnation_b[loc] >= retry_patience) & ~hit_tol
+            )
             active_b[loc[timed_out]] = False
 
         for li, gi in enumerate(batch_idx):
@@ -470,8 +479,205 @@ def iaaft_surrogates(
         newly_converged = {int(gi) for gi in batch_idx if converged[gi]}
         for gi in newly_converged:
             pending.remove(gi)
+
+        batch_set = set(batch_idx.tolist())
         for gi in pending:
-            if gi in set(batch_idx.tolist()):
+            if gi in batch_set:
+                attempts[gi] += 1
+
+    return surrogates, spec_errors, converged
+
+
+def _iaaft_surrogates_gpu(
+    x, n_surrogates, max_iter, tol, patience, retry,
+    retry_patience, seed, dtype, max_retries, cp
+):
+    """GPU implementation of IAAFT using CuPy."""
+
+    x_f64 = np.asarray(x, dtype=np.float64)
+    x_sorted_f64 = np.sort(x_f64)
+
+    x_gpu = cp.asarray(x_f64.astype(dtype))
+    x_sorted_gpu = cp.sort(x_gpu)
+
+    n = x_gpu.size
+    target_amp = cp.abs(cp.fft.rfft(x_gpu)).astype(dtype)
+    norm_target = cp.linalg.norm(target_amp) + 1e-30
+    n_freq = target_amp.size
+    _eps = np.dtype(dtype).type(1e-7)
+
+    rng = cp.random.RandomState(seed)
+
+    # Results remain on CPU; iterative calculations remain on GPU.
+    surrogates = np.empty((n_surrogates, n), dtype=np.float64)
+    spec_errors = np.full(n_surrogates, np.inf, dtype=np.float64)
+    converged = np.zeros(n_surrogates, dtype=bool)
+    attempts = np.ones(n_surrogates, dtype=int)
+
+    def _init_batch(k):
+        rand_phases = cp.exp(
+            1j * rng.uniform(0, 2 * np.pi, (k, n_freq))
+        ).astype(cp.complex64)
+
+        Y_freq = target_amp[None, :] * rand_phases
+        Y = cp.fft.irfft(Y_freq, n=n, axis=1)
+
+        order = cp.argsort(Y, axis=1)
+        Y_sorted = cp.empty_like(Y)
+        rows = cp.arange(k)[:, None]
+        Y_sorted[rows, order] = x_sorted_gpu
+
+        return Y_sorted
+
+    def _save_surrogate(out_index, y_row):
+        y_cpu = cp.asnumpy(y_row)
+        order = np.argsort(y_cpu)
+        surrogates[out_index, order] = x_sorted_f64
+
+    _stag_tol = tol * 0.1
+
+    # ------------------------------------------------------------------
+    # No retry
+    # ------------------------------------------------------------------
+
+    if not retry:
+        Y = _init_batch(n_surrogates)
+        fft_y = cp.fft.rfft(Y, axis=1)
+
+        prev_error = cp.full(
+            n_surrogates, cp.inf, dtype=cp.float64
+        )
+        stagnation = cp.zeros(n_surrogates, dtype=cp.int32)
+        active = cp.ones(n_surrogates, dtype=cp.bool_)
+
+        for _ in range(max_iter):
+            if not bool(cp.any(active)):
+                break
+
+            act = cp.where(active)[0]
+            fy = fft_y[act]
+            phases = fy / (cp.abs(fy) + _eps)
+
+            Z = cp.fft.irfft(
+                target_amp[None, :] * phases, n=n, axis=1
+            )
+
+            order = cp.argsort(Z, axis=1)
+            Y[act[:, None], order] = x_sorted_gpu
+
+            fy_new = cp.fft.rfft(Y[act], axis=1)
+            fft_y[act] = fy_new
+
+            diff = cp.abs(fy_new) - target_amp[None, :]
+            spec_err = cp.sqrt(cp.sum(diff * diff, axis=1)) / norm_target
+
+            improvement = cp.abs(prev_error[act] - spec_err)
+            prev_error[act] = spec_err
+
+            hit_tol = spec_err < tol
+            hit_tol_cpu = cp.asnumpy(hit_tol)
+            act_cpu = cp.asnumpy(act)
+
+            converged[act_cpu[hit_tol_cpu]] = True
+            active[act[hit_tol]] = False
+
+            stagnated = improvement < _stag_tol
+            stagnation[act[stagnated]] += 1
+            stagnation[act[~stagnated]] = 0
+
+            timed_out = (stagnation[act] >= patience) & ~hit_tol
+            active[act[timed_out]] = False
+
+        spec_errors[:] = cp.asnumpy(prev_error)
+
+        for i in range(n_surrogates):
+            _save_surrogate(i, Y[i])
+
+        return surrogates, spec_errors, converged
+
+    # ------------------------------------------------------------------
+    # Retry mode
+    # ------------------------------------------------------------------
+
+    pending = list(range(n_surrogates))
+
+    while pending:
+        if max(attempts) > max_retries:
+            break
+
+        batch_idx = np.asarray(pending, dtype=int)
+        k = len(batch_idx)
+
+        Y = _init_batch(k)
+        fft_y = cp.fft.rfft(Y, axis=1)
+
+        prev_error = cp.full(k, cp.inf, dtype=cp.float64)
+        stagnation = cp.zeros(k, dtype=cp.int32)
+        active = cp.ones(k, dtype=cp.bool_)
+
+        for _ in range(max_iter):
+            if not bool(cp.any(active)):
+                break
+
+            loc = cp.where(active)[0]
+            fy = fft_y[loc]
+            phases = fy / (cp.abs(fy) + _eps)
+
+            Z = cp.fft.irfft(
+                target_amp[None, :] * phases, n=n, axis=1
+            )
+
+            order = cp.argsort(Z, axis=1)
+            Y[loc[:, None], order] = x_sorted_gpu
+
+            fy_new = cp.fft.rfft(Y[loc], axis=1)
+            fft_y[loc] = fy_new
+
+            diff = cp.abs(fy_new) - target_amp[None, :]
+            spec_err = cp.sqrt(cp.sum(diff * diff, axis=1)) / norm_target
+
+            improvement = cp.abs(prev_error[loc] - spec_err)
+            prev_error[loc] = spec_err
+
+            hit_tol = spec_err < tol
+            hit_loc = cp.where(hit_tol)[0]
+
+            # Only the indices of converged surrogates cross the PCIe bus.
+            hit_loc_cpu = cp.asnumpy(hit_loc)
+            loc_cpu = cp.asnumpy(loc)
+
+            for local_idx in hit_loc_cpu:
+                li = loc_cpu[local_idx]
+                gi = batch_idx[li]
+
+                _save_surrogate(gi, Y[li])
+                spec_errors[gi] = float(cp.asnumpy(prev_error[li]))
+                converged[gi] = True
+
+            active[loc[hit_tol]] = False
+
+            stagnated = improvement < _stag_tol
+            stagnation[loc[stagnated]] += 1
+            stagnation[loc[~stagnated]] = 0
+
+            timed_out = (
+                (stagnation[loc] >= retry_patience) & ~hit_tol
+            )
+            active[loc[timed_out]] = False
+
+        prev_error_cpu = cp.asnumpy(prev_error)
+
+        for li, gi in enumerate(batch_idx):
+            if not converged[gi]:
+                spec_errors[gi] = prev_error_cpu[li]
+
+        newly_converged = {int(gi) for gi in batch_idx if converged[gi]}
+        for gi in newly_converged:
+            pending.remove(gi)
+
+        batch_set = set(batch_idx.tolist())
+        for gi in pending:
+            if gi in batch_set:
                 attempts[gi] += 1
 
     return surrogates, spec_errors, converged
